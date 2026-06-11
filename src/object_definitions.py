@@ -58,9 +58,17 @@ class wx_plus_b(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_gradients):
         """
-        This is one of the most important insights in backprop.
-        The shape of grad_output is always:
-        Exactly the same shape as the output of the forward pass.
+        "This is one of the most important insights in backprop.
+        The shape of grad_output is always: Exactly the same shape as the output of the forward pass." (ChatGPT)
+
+        Basically:
+            the shape of the return of forward == the backwards output gradient
+            `forward(input).shape == output_gradient.shape`
+
+            &
+
+            the shape of the inputs (and their order in pytorch) == the shape of the return of the tensors in backward (and their order)
+            `[input_1.shape, input_2.shape, ...] == [tensor.shape for tensor in backward(ctx, output_gradient)]`
 
         :param ctx: Pytorch Context
             weights: Tensor(out_features, in_features)
@@ -190,7 +198,6 @@ class embedding_functions(torch.autograd.Function):
     @staticmethod
     def forward(ctx, token_ids, embedding_tensor):
         """
-
         :param token_ids: (batch_size, sequence_length) Each column contains a token ID
         :param embedding_tensor: (vocab_size, embedding_dimensions)
         :return: (batch_size, sequence_length, embedding_dimensions) Every scalar in the sequence length is replaced
@@ -205,7 +212,6 @@ class embedding_functions(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_gradients: torch.Tensor):
         """
-
         token_ids: (batch_size, sequence_length) Each column contains a token ID
 
         ctx.embedding_shape: tuple with numbers representing (vocab_size, embedding_dimensions)

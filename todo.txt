@@ -1,0 +1,1 @@
+Add readme.md explaining the transformer and each step as well as any relevant details about the implementation

@@ -23,8 +23,7 @@ TransformerBlock
 GPT
 """
 
-# When done write a doc string on how everything works together
-# TODO: Write doc strings on the concept of the shapes of gradients relative a functions outputs and inputs
+# TODO: Write doc strings on the concept of the shapes of gradients relative a functions outputs and inputs (maybe in readme)
 
 
 class relu(torch.autograd.Function):
@@ -67,7 +66,7 @@ class wx_plus_b(torch.autograd.Function):
             weights: Tensor(out_features, in_features)
             inputs:  Tensor(batch_size, in_features)
             biases:  Tensor(out_features,)
-        :param output_gradients: Tensor(batch_size, out_features)
+        :param output_gradients: Tensor(batch_size, out_features) Same dimensions as return in forward
         :return:
         """
 

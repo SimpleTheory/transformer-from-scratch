@@ -104,17 +104,31 @@ class wx_plus_b(torch.autograd.Function):
 
 class softmax(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor):
-        # TODO: List matrix sizes
-        # TODO: Subtract by max in tensor to prevent overflow since softmax cares about relative differences
-        # [e**current / sum([e**i for i in list_of_num]) for current in list_of_num]
+    def forward(ctx, input_tensor: torch.Tensor):
+        """
+        The softmax formula is:
+            [e**current / sum([e**i for i in list_of_num]) for current in list_of_num]
+
+        :param input_tensor: Any tensor
+        :return: Same shape with softmax applied across each row
+        """
+        # Shift the input by the maximum value to prevent overflow and imprecision from floats. Basically, `e**input` can be very large
+        # and softmax only cares about relative magnitude. So shifting everything over equally prevents the overflow but
+        # keeps the output the same.
+        shifted = input_tensor - input_tensor.max(dim=-1, keepdim=True).values
+
         # Scalar operation being applied to the whole tensor
-        input_tensor_with_each_element_to_the_e = torch.e ** input_tensor
+        # input_tensor_with_each_element_to_the_e = torch.e ** input_tensor
+
+        # This line is the same as the line above however I am using `.exp()` because the implementation of this is faster
+        # and more stable due to more diligent work on the float value of the e constant in different circumstance.
+        input_tensor_with_each_element_to_the_e = shifted.exp()
 
         # Below each element to the e is now being divided by the sum of its row
+
         # (In the divisor) For each row, sum across the columns, and keep the result as a column-shaped tensor.
-        # dim -1 is the dimension being summed across (you are summing across the columns here, thus condensing the rows)
-        # Without keepdim it would flatten the values to one row, keepdim keeps each row here but with only its condensed value left.
+        # `dim -1` is the dimension being summed across (you are summing across the columns here, thus condensing the rows into a single summed value).
+        # Without `keepdim` it would flatten the values to one row, `keepdim` keeps each row here but with only its condensed value left.
         result = input_tensor_with_each_element_to_the_e / input_tensor_with_each_element_to_the_e.sum(dim=-1, keepdim=True)
 
         # Save the result because it is needed because softmax's derivative implementation in pytorch is wierd
@@ -238,5 +252,4 @@ class embedding_functions(torch.autograd.Function):
 
         # The tokens don't have a gradient since the model isn't changing them (at least in this architecture)
         return None, embedding_gradients
-        
         

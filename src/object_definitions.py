@@ -222,7 +222,7 @@ class embedding_functions(torch.autograd.Function):
         :return:
         """
         tokens_ids = ctx.saved_tensors
-        embedding_gradients = torch.zeros_like(ctx.embedding_shape, device=output_gradients.device, dtype=output_gradients.dtype)
+        embedding_gradients = torch.zeros(ctx.embedding_shape, device=output_gradients.device, dtype=output_gradients.dtype)
 
         # Args:
             # 1. Which dimension to add into, here add into the rows of embedding gradient (basically into the vocab size

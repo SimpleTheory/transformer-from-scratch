@@ -59,7 +59,8 @@ class wx_plus_b(torch.autograd.Function):
     def backward(ctx, output_gradients):
         """
         "This is one of the most important insights in backprop.
-        The shape of grad_output is always: Exactly the same shape as the output of the forward pass." (ChatGPT)
+        The shape of grad_output is always:
+        Exactly the same shape as the output of the forward pass." (ChatGPT)
 
         Basically:
             the shape of the return of forward == the backwards output gradient
@@ -75,7 +76,10 @@ class wx_plus_b(torch.autograd.Function):
             inputs:  Tensor(batch_size, in_features)
             biases:  Tensor(out_features,)
         :param output_gradients: Tensor(batch_size, out_features) Same dimensions as return in forward
-        :return:
+
+        :return: input_gradients: Tensor(batch_size, in_features) Same dimensions as inputs in forward
+                 weight_gradients: Tensor(out_features, in_features)
+                 bias_gradients: Tensor(out_features,)
         """
 
         inputs, weights, biases = ctx.saved_tensors
@@ -114,7 +118,8 @@ class softmax(torch.autograd.Function):
         """
         # Shift the input by the maximum value to prevent overflow and imprecision from floats. Basically, `e**input` can be very large
         # and softmax only cares about relative magnitude. So shifting everything over equally prevents the overflow but
-        # keeps the output the same.
+        # keeps the output the same. If there are large negative numbers its ok exponentiating by negatives gives you
+        # a small number.
         shifted = input_tensor - input_tensor.max(dim=-1, keepdim=True).values
 
         # Scalar operation being applied to the whole tensor
@@ -137,7 +142,6 @@ class softmax(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, output_gradients):
-        # TODO: List matrix sizes
         # I kind of understand the derivative here with the jacobian matrix across the values relative to each other
         # since they affect each other. But I don't fully understand what is going on and how this secondary application
         # works for the chain rule. Though some of the fundamental concepts like multiplying the out gradient across the inputs
@@ -252,4 +256,120 @@ class embedding_functions(torch.autograd.Function):
 
         # The tokens don't have a gradient since the model isn't changing them (at least in this architecture)
         return None, embedding_gradients
+        
+
+class cross_entropy(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, probabilities, targets):
+        """
+        Basically what's happening in the formula everything is going to cancel out except for the target ()
+        then you take the natural log of the target's probability * -1 (The negative is because a log of decimals gives
+        negative numbers, and you need the loss to be bigger than 0 (since 0 is the "ideal" output), basically the same
+        as doing absolute value though).
+
+        tldr: sum(-target * ln(probability)) (where target on everything but 1 element is 0)
+        tldrest: -ln(correct_probability)
+
+        :param ctx:
+        :param probabilities: (Batch, Classes) Output probabilities from the model
+        :param targets: (Batch, Classes) Tensor with 0s for everything except 1 on target
+        :return: (Batch,) One loss score per batch
+        """
+        ctx.save_for_backward(probabilities, targets)
+        return -(targets * probabilities.log()).sum(dim=-1).mean()
+
+    @staticmethod
+    def backward(ctx, output_gradients):
+        """
+        Add an extra dimension to broadcast to each element: (batch,) unsqueeze -> (batch, 1)
+        Original function (target always 1 or 0) is:
+            -target * ln(probability)
+        Therefore given the fact that the derivative of ln(x) == 1/x the derivative with respect to probability is:
+            -target * 1/probability
+        Then apply chain rule to each element (broadcast):
+            output_gradient (for that batch) * -target/probability
+
+        One note this implementation is numerically unstable because an element of probability can be 0
+        That (and the fact that it makes the derivative way easier) is why it's usually wrapped in softmax
+
+        probabilities: (Batch, Classes)
+        targets: (Batch, Classes)
+        :param output_gradients: (Batch,)
+        :return: gradient_probabilities (Batch, Class), None (Targets don't need gradients they are the expected value)
+        """
+        probabilities, targets = ctx.saved_tensors
+        gradient_probabilities = output_gradients.unsqueeze(-1) * (-targets / probabilities)
+
+        return gradient_probabilities, None
+
+
+class softmaxed_cross_entropy(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, results_of_model_tensor, targets):
+        """
+        cross_entropy over a sample's total outputs is (because only one target is active):
+            `sum(-target * ln(probability))`
+        softmax makes each probability:
+            `e**current / sum([e**i for i in list_of_num]`
+        therefore if you apply softmax to the probabilities beforehand you get:
+           `sum(-target * (ln(e**current / sum([e**i for i in list_of_num])))`
+        simplify with log rule `log(a/b) == log(a) - log(b)`:
+            `sum(-target * (ln(e**current) - ln(sum([e**i for i in list_of_num]))))`
+        and again:
+            `sum(-target * (current - ln(sum([e**i for i in list_of_num]))))`
+        multiply target into the parenthesis
+            `sum(-target * current - (-target * ln(sum([e**i for i in list_of_num]))))`
+        split with the idea that `sum(a+b) == sum(a) + sum(b)`
+        it is also + because you are doing `- -target * ...` which is a double minus
+            `sum(-target * current) + sum(target * ln(sum([e**i for i in list_of_num]))`
+        because the ln term is constant with respect to target meaning it is always the same number no matter what the target
+        is we can factor it out of the sum (basically ab + cb == b(a+c))
+            `sum(-target * current) + sum(target) * ln(sum([e**i for i in list_of_num]))`
+        we know that the list of targets is all 0s except for 1, `so sum(target) == 1`:
+            `sum(-target * current) + 1 * ln(sum([e**i for i in list_of_num]))`
+        and since only 1 target has 1 and the rest are 0s `sum(-target * current) == -current`:
+            `-correct_class + ln(sum([e**i for i in list_of_num]))`
+        aka
+            `ln(sum([e**i for i in list_of_num])) - correct class' value`
+        :param results_of_model_tensor: (batch_size, sequence_length, vocab_size)
+        :param targets: (batch_size, sequence_length)
+        :return:
+        """
+        # TODO: FIX THIS FROM GPT PEER REVIEW!
+            # Shift problems
+            # Gather dimension problems
+
+        # Shift to prevent overflow
+        max_values = results_of_model_tensor.max(dim=-1, keepdim=True).values
+        shifted = results_of_model_tensor - max_values
+
+        # Find the correct class' value
+        # gather has 2 arguments
+            # the dimension to index (index the rows)
+            # a list of indices to get from
+                # unsqueeze turns out list into a table of rows for each value and 1 column (basically match the rows of the original)
+                # so each row gets indexed by its corresponding
+            # Then returns a new matrix with equal rows (1st arg) and one column where each value is the one indexed from the index column (2nd arg)
+        list_of_correct_values_per_batch = results_of_model_tensor.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+
+        # Sum dim=-1 condenses across the columns leaving one value for each row
+        # This is a constant subtraction (1 constant across each batch, so for the batch it is a broadcast)
+        # For this implementation you have to readd the shifted's magnitude to each number to get the true result
+        # The softmax will handle the shifted the same regardless but you want to readd the max value for the ln
+        loss_per_token = torch.log(torch.exp(shifted).sum(dim=-1) + max_values.squeeze(-1)) - list_of_correct_values_per_batch
+
+        ctx.save_for_backward(shifted, targets)
+
+        # Mean loss for the whole batch
+        return loss_per_token.mean()
+
+    
+    @staticmethod
+    def backward(ctx, output_gradients):
+        shifted, targets, = ctx.saved_tensors
+        # See softmax's forward
+        shifted_exp = shifted.exp()
+        shifted_exp_sum = shifted_exp.sum(dim=-1, keepdim=True)
+        probabilities = shifted_exp / shifted_exp_sum
+        # TODO: Calculate gradient of each parameter and return in order above!
         

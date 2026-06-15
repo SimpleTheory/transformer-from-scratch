@@ -139,7 +139,7 @@ class softmax(torch.autograd.Function):
         # Save the result because it is needed because softmax's derivative implementation in pytorch is wierd
         ctx.save_for_backward(result)
         return result
-    
+
     @staticmethod
     def backward(ctx, output_gradients):
         # I kind of understand the derivative here with the jacobian matrix across the values relative to each other
@@ -256,7 +256,6 @@ class embedding_functions(torch.autograd.Function):
 
         # The tokens don't have a gradient since the model isn't changing them (at least in this architecture)
         return None, embedding_gradients
-        
 
 class cross_entropy(torch.autograd.Function):
     @staticmethod
@@ -301,7 +300,6 @@ class cross_entropy(torch.autograd.Function):
         gradient_probabilities = output_gradients.unsqueeze(-1) * (-targets / probabilities)
 
         return gradient_probabilities, None
-
 
 class softmaxed_cross_entropy(torch.autograd.Function):
     @staticmethod

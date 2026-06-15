@@ -1,0 +1,19 @@
+(ChatGPT's Syllabus Instructions)
+If I were doing this project myself, I'd implement the Functions in roughly this order:
+
+LinearFunction (wx_plus_b)
+ReLUFunction
+SoftmaxFunction
+CrossEntropyFunction
+LayerNormFunction
+EmbeddingFunction
+
+Then build Modules:
+
+Linear
+LayerNorm
+Embedding
+FeedForward
+MultiHeadAttention
+TransformerBlock
+GPT

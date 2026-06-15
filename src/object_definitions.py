@@ -243,7 +243,7 @@ class embedding_functions(torch.autograd.Function):
         embedding_gradients = torch.zeros(ctx.embedding_shape, device=output_gradients.device, dtype=output_gradients.dtype)
 
         # Args:
-            # 1. Which dimension to add into, here add into the rows of embedding gradient (basically into the vocab size
+            # 1. Which dimension to add into, here add into the rows (basically into the vocab size
                 # because each value in the embedding dimension will get its own gradient)
             # 2. Index of which rows should be added into and their order,
                 # basically a list of tokens in order for what their gradient should be
@@ -333,43 +333,74 @@ class softmaxed_cross_entropy(torch.autograd.Function):
             `ln(sum([e**i for i in list_of_num])) - correct class' value`
         :param results_of_model_tensor: (batch_size, sequence_length, vocab_size)
         :param targets: (batch_size, sequence_length)
-        :return:
+        :return: Scalar mean of loss per token per batch
         """
-        # TODO: FIX THIS FROM GPT PEER REVIEW!
-            # Shift problems
-            # Gather dimension problems
-
         # Shift to prevent overflow
         max_values = results_of_model_tensor.max(dim=-1, keepdim=True).values
         shifted = results_of_model_tensor - max_values
 
         # Find the correct class' value
         # gather has 2 arguments
-            # the dimension to index (index the rows)
-            # a list of indices to get from
-                # unsqueeze turns out list into a table of rows for each value and 1 column (basically match the rows of the original)
-                # so each row gets indexed by its corresponding
+            # 1. the dimension to index (index across the columns (basically indexing columns in a row))
+            # 2. a list of indices to get from (each row)
+                # Unsqueeze turns the list into a column so you get one value to index per row
+                # and each row of the list corresponds to one of the source
             # Then returns a new matrix with equal rows (1st arg) and one column where each value is the one indexed from the index column (2nd arg)
         list_of_correct_values_per_batch = results_of_model_tensor.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
         # Sum dim=-1 condenses across the columns leaving one value for each row
         # This is a constant subtraction (1 constant across each batch, so for the batch it is a broadcast)
         # For this implementation you have to readd the shifted's magnitude to each number to get the true result
-        # The softmax will handle the shifted the same regardless but you want to readd the max value for the ln
-        loss_per_token = torch.log(torch.exp(shifted).sum(dim=-1) + max_values.squeeze(-1)) - list_of_correct_values_per_batch
+        # The softmax will handle the shifted the same regardless, but you want to readd the max value for the loss
+        loss_per_token = torch.log(torch.exp(shifted).sum(dim=-1)) + max_values.squeeze(-1) - list_of_correct_values_per_batch
 
         ctx.save_for_backward(shifted, targets)
 
         # Mean loss for the whole batch
         return loss_per_token.mean()
 
-    
     @staticmethod
     def backward(ctx, output_gradients):
+        """
+        shifted: (batch_size, sequence_length, vocab_size)
+        targets: (batch_size, sequence_length)
+
+        :param output_gradients: Scalar Value 1.0 (unless I add more stuff upstream like a loss modifier or a combo loss,
+        then it would inherit the gradient relative how it'd affect the loss mod/combo loss)
+        :return: same as shifted, None (Same as inputs from forward)
+        """
         shifted, targets, = ctx.saved_tensors
         # See softmax's forward
         shifted_exp = shifted.exp()
         shifted_exp_sum = shifted_exp.sum(dim=-1, keepdim=True)
         probabilities = shifted_exp / shifted_exp_sum
-        # TODO: Calculate gradient of each parameter and return in order above!
-        
+        # Unsqueeze the targets so instead of a list of targets you get one column of targets (one per row)
+        index = targets.unsqueeze(-1)
+        # (arg src) Make a -1 tensor with the same shape as the index
+        # What the index and dim are telling you here is for each row on which column are we going to add that specific row's -1 (from src)
+        # since dim=columns here its for each row determine the column(s) being added to and you add the equivalent value from src (since index and src have the same dim)
+        # in practice this indexes the target for each row and does -1 on its probability
+        # The extra _ after `...add_` is pytorch convention for an inplace operation
+        # Basically: probability -= target
+        probabilities.scatter_add_(
+            dim=-1,
+            index=index,
+            src=-torch.ones_like(index, dtype=shifted.dtype)
+        )
+        # The derivative of mean (cf forward pass `return loss_per_token.mean()`) of any element used in the mean is that
+        # 1 / total num of elements
+        # For example, original equation: (x1 + x2 + x3 + x4) / 4
+        # If you change any given x a little bit the outcome will be (the change)/4 (ie change by one -> output change 1/4)
+        # When you apply the derivative to each element it ends up being: probabilities / total num of tokens
+        # We can get total token count with targets because there every token is accounted for with a 0 or 1
+        probabilities /= targets.numel()
+
+        # Chain rule scalar multiplication
+        probabilities *= output_gradients
+
+        # probabilities should be renamed after scatter_add_ to gradient_probabilities since that - operation is literally the
+        # gradient (at least before applying the derivative of the mean)
+
+        # Targets has no gradient so this is the return
+        return probabilities, None
+

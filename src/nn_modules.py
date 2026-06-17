@@ -7,7 +7,7 @@ import autograd_functions
 --Linear
 --LayerNorm
 --FeedForward
-Embedding
+--Embedding
 MultiHeadAttention
 TransformerBlock
 GPT

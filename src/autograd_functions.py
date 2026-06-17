@@ -226,7 +226,7 @@ class layer_normalization(torch.autograd.Function):
         # Have to include a None return because of tiny_num, though it is not being trained
         return gradient_input, gradient_weights, gradient_bias, None
 
-class embedding_functions(torch.autograd.Function):
+class embedding_function(torch.autograd.Function):
     @staticmethod
     def forward(ctx, token_ids, embedding_tensor):
         """
@@ -237,8 +237,9 @@ class embedding_functions(torch.autograd.Function):
         """
         ctx.save_for_backward(token_ids)
         ctx.embedding_shape = embedding_tensor.shape
-        # Indexes everything in the last dimension of token_ids (the scalar token ids) and replaces them with the
-        # corresponding embedding dimensions in its index in vocab size
+        # For every integer token ID in token_ids, select that row from embedding_tensor.
+            # Since the token ids were scalars this adds an extra dimension:
+                # (batch_size, sequence_length) -> (batch_size, sequence_length, embedding_dimensions)
         return embedding_tensor[token_ids]
 
     @staticmethod
@@ -253,7 +254,7 @@ class embedding_functions(torch.autograd.Function):
                         2 batches × (at) 3 token positions × (have) 4 gradient values
         :return:
         """
-        tokens_ids = ctx.saved_tensors
+        token_ids, = ctx.saved_tensors
         embedding_gradients = torch.zeros(ctx.embedding_shape, device=output_gradients.device, dtype=output_gradients.dtype)
 
         # Args:
@@ -266,7 +267,8 @@ class embedding_functions(torch.autograd.Function):
                 # will then be added back into the corresponding vocab's gradient given in arg 2.
                     # Reshape here is reshaping to (batch_size * sequence_length) essentially flattening that part which is the order
                     # in which forward looked up each token
-        embedding_gradients.index_add(0, tokens_ids.reshape(-1), output_gradients.reshape(-1, output_gradients.shape[-1]))
+            # The trailing underscore after the method in pytorch makes it an inplace operation
+        embedding_gradients.index_add_(0, token_ids.reshape(-1), output_gradients.reshape(-1, output_gradients.shape[-1]))
 
         # The tokens don't have a gradient since the model isn't changing them (at least in this architecture)
         return None, embedding_gradients

@@ -4,10 +4,10 @@ import autograd_functions
 """
 ... Then build Modules:
 
-Linear
-LayerNorm
+--Linear
+--LayerNorm
+--FeedForward
 Embedding
-FeedForward
 MultiHeadAttention
 TransformerBlock
 GPT
@@ -83,5 +83,22 @@ class LayerNorm(torch.nn.Module):
 
     def forward(self, inputs):
         return autograd_functions.layer_normalization.apply(inputs, self.weights, self.biases)
+
+class EmbeddingLayer(torch.nn.Module):
+    def __init__(self, vocab_size: int, embedding_dimensions: int):
+        super().__init__()
+        # TODO Arbitrarily the randomized values to be lower for more stable gradients (gpt recommends .02)
+        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions))
+
+    def forward(self, tokens):
+        """
+        For the tokens, each element is a token ID and each row is one sequence.
+        Creates a new tensor where each corresponding token id is replaced with its embedding vector.
+
+        :param tokens: (batch_size, sequence_length)
+        !TOKENS MUST BE AN INT TENSOR! usually dtype=torch.long (otherwise the indexing won't work)
+        :return: (batch_size, sequence_length, embedding_dimensions)
+        """
+        return autograd_functions.embedding_function.apply(tokens, self.embedding_matrix)
 
 

@@ -45,11 +45,15 @@ class wx_plus_b(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor):
         """
-        :param ctx: Pytorch Context
-        :param inputs: Tensor(batch_size, in_features)
+        ... = all the leading dimensions
+
+        Batch size doesn't matter because you are still multiplying them all by the same Weight matrix anyways
+        The matrix multiplication is batched so for every one in the batch it will do this same operation.
+
+        :param inputs: Tensor(..., in_features)
         :param weights: Tensor(out_features, in_features)
         :param biases: Tensor(out_features,)
-        :return: Tensor(batch_size, out_features)
+        :return: Tensor(..., out_features)
         """
         ctx.save_for_backward(inputs, weights, biases)
         # (b,i) @ (i, o) + (o,)
@@ -155,7 +159,12 @@ class softmax(torch.autograd.Function):
 
 class layer_normalization(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: FunctionCtx, input_tensor: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor, tiny_num_to_avoid_dev_by_0: float = 1e-5):
+    def forward(
+            ctx: FunctionCtx,
+            input_tensor: torch.Tensor,
+            weights: torch.Tensor,
+            biases: torch.Tensor,
+            tiny_num_to_avoid_dev_by_0: float = 1e-5):
         """
         ((element - mean) / std_dev) * weight + bias
 
@@ -176,39 +185,44 @@ class layer_normalization(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_gradients):
         """
-        original input: (batch_size, features, feature_count)
+       Backprop through normalization:
+            1. Start with the gradient after weight scaling.
+            2. Remove the part caused by the mean, since changing one element changes the row mean.
+            3. Remove the part caused by the variance/std, since changing one element changes the row scale.
+            4. Divide by std_dev because the forward pass divided by std_dev.
 
-        std_dev: (batch_size, features, 1) (One std_dev value per feature)
-
+        input_tensor: (batch_size, features, feature_count)
+        std_dev: (batch_size, features, 1) (One std_dev value per feature/row)
         weights: (feature_count,) (Weights broadcast per feature)
-        :param output_gradients: same as original input
+        :param output_gradients: (batch_size, features, feature_count)
         :return:
         """
         normalized_tensor, std_dev, weights, = ctx.saved_tensors
 
-        # * Here because it is * (a broadcast) in the forward pass
+        # 1. * Here because it is * (a broadcast) in the forward pass
         gradient_normalized_tensor = weights * output_gradients
 
-        # I don't fully understand this derivative but the basic idea is that a change in x affects three things:
-            # 1. itself (in x - x_mean)
-            # 2. The mean (in ...)
-            # 3. The std_dev (sqrt(x_var))
-        # So the gradient is essentially computing what a small change in the input would do to those 3 parts of the eq
         gradient_input = (
-                # This part computes dx/dx_mean
+                # 2. Remove the part caused by the mean, since changing one element changes the row mean.
                 gradient_normalized_tensor - gradient_normalized_tensor.mean(dim=-1, keepdim=True)
-                # This part computes the scale that was removed in the original function by using the gradient of the output
+                # 3. This part computes the scale that was removed in the original function by using the gradient of the output
                 # and the output to reapply the scale. The mean is then used for the scale removed from each element to be reapplied,
                 # because the scale is reapplied on a feature wide level, not per element.
                 - normalized_tensor * (gradient_normalized_tensor * normalized_tensor).mean(dim=-1, keepdim=True)
-                # Rescale by std_dev
+                #  4. Rescale by std_dev
                 ) / std_dev
-        # Sum is to get the sum of all the gradients for each element across batch
-        # (0, 1) means to sum across all batches and all rows: ex for sum every row[0] for over every batch to condense to a single value
-        # That will leave only one value the gradient sum across every row, leaving only columns
-        gradient_weights = (normalized_tensor * output_gradients).sum(dim=(0, 1))
+
+        # This creates a tuple such that, if
+            # output_gradients.shape == (2, 5, 4), then
+            # dims_to_sum == (0, 1)
+        # Basically creates a tuple of the dims to sum over (all of them except the last one as seen above)
+        dims_to_sum = tuple(range(output_gradients.ndim - 1))
+
+        # Sum is to get the sum of all the gradients for each element across each batch
+        # This will sum everything (including batches, rows, etc.) except the columns basically leaving one value per column
+        gradient_weights = (normalized_tensor * output_gradients).sum(dim=dims_to_sum)
         # One bias value is shared across all batch/feature positions, so all those gradient contributions accumulate into that one bias gradient.
-        gradient_bias = output_gradients.sum(dim=(0, 1))
+        gradient_bias = output_gradients.sum(dim=dims_to_sum)
         # Have to include a None return because of tiny_num, though it is not being trained
         return gradient_input, gradient_weights, gradient_bias, None
 

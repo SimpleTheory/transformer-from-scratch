@@ -43,7 +43,7 @@ class relu(torch.autograd.Function):
 
 class wx_plus_b(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor):
+    def forward(ctx, inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor, normal: bool = False):
         """
         ... = all the leading dimensions
 
@@ -51,13 +51,15 @@ class wx_plus_b(torch.autograd.Function):
         The matrix multiplication is batched so for every one in the batch it will do this same operation.
 
         :param inputs: Tensor(..., in_features)
-        :param weights: Tensor(out_features, in_features)
+        :param weights: Tensor(out_features, in_features) (can be swapped if normal is True)
         :param biases: Tensor(out_features,)
+        :param normal: If True makes it so weights takes (in_features, out_features)
         :return: Tensor(..., out_features)
         """
         ctx.save_for_backward(inputs, weights, biases)
+        ctx.normal = normal
         # (b,i) @ (i, o) + (o,)
-        return (inputs @ weights.T) + biases
+        return (inputs @ (weights if normal else weights.T)) + biases
 
     @staticmethod
     def backward(ctx, output_gradients):
@@ -76,22 +78,39 @@ class wx_plus_b(torch.autograd.Function):
             `[input_1.shape, input_2.shape, ...] == [tensor.shape for tensor in backward(ctx, output_gradient)]`
 
         :param ctx: Pytorch Context
-            weights: Tensor(out_features, in_features)
-            inputs:  Tensor(batch_size, in_features)
+            weights: Tensor(out_features, in_features) or (in_features, out_features)
+            inputs:  Tensor(..., in_features)
             biases:  Tensor(out_features,)
-        :param output_gradients: Tensor(batch_size, out_features) Same dimensions as return in forward
+            normal: is a flag to tell which shape the weights are, default is False which is the first option
+        :param output_gradients: Tensor(..., out_features) Same dimensions as return in forward
 
-        :return: input_gradients: Tensor(batch_size, in_features) Same dimensions as inputs in forward
-                 weight_gradients: Tensor(out_features, in_features)
+        :return: input_gradients: Tensor(..., in_features) Same dimensions as inputs in forward
+                 weight_gradients: Tensor(out_features, in_features) or (out_features, in_features)
                  bias_gradients: Tensor(out_features,)
         """
 
         inputs, weights, biases = ctx.saved_tensors
+        # flatten leading dims: (..., in_features) -> (N, in_features)
 
-        # (o, i) = (b, o).T (b,i)
-        grad_weights = output_gradients.T @ inputs
-        # (b, i) = (b, o) (o, i)
-        grad_inputs = output_gradients @ weights
+        # This gives you a (multiply every dim except the last, last dim)
+            # Example -> (5,4,3,2) -> (60,2)
+        flattened_input = inputs.reshape(-1, inputs.shape[-1])  # (N, i)
+        flattened_output_gradient = output_gradients.reshape(-1, output_gradients.shape[-1])  # (N, o)
+
+        # If the weights are (i, o)
+        if ctx.normal:
+            # (i, o) = (N, i).T (N, o)
+            grad_weights = flattened_input.T @ flattened_output_gradient
+            # (N, i) = (N, o) (i, o).T
+            grad_inputs = flattened_output_gradient @ weights.T
+
+        # The weights are (o, i)
+        else:
+            # (o, i) = (N, o).T (N, i)
+            grad_weights = flattened_output_gradient.T @ flattened_input
+            # (N, i) = (N, o) (o, i)
+            grad_inputs = flattened_output_gradient @ weights
+
         # (b, o) sum across all o's leaving only (o,)
         # When you condense on a dimension you are left with that dimension
             # Ex: (3, 2)
@@ -106,25 +125,32 @@ class wx_plus_b(torch.autograd.Function):
         # but across the whole batch it is the sum of each element's gradient in the batch
 
         # Any time there is a broadcast addition this would be the derivative
-        grad_biases = output_gradients.sum(dim=0)
+        # grad_biases = output_gradients.sum(over all dimension except columns)
+        # basically 1 value left per column per batch
+        # sum over all leading dimensions, keep out_features (which is the last dimension)
+        grad_biases = output_gradients.sum(dim=tuple(range(output_gradients.ndim - 1)))
 
-        return grad_inputs, grad_weights, grad_biases
+        # Need to reshape grad_inputs for N to be ... just like the original input
+        # None is for the normal parameter
+        return grad_inputs.reshape(inputs.shape), grad_weights, grad_biases, None
 
 class softmax(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor: torch.Tensor):
+    def forward(ctx, input_tensor: torch.Tensor, dim: int = -1):
         """
         The softmax formula is:
             [e**current / sum([e**i for i in list_of_num]) for current in list_of_num]
 
         :param input_tensor: Any tensor
-        :return: Same shape with softmax applied across each row
+        :param dim: Which dimension to softmax
+        :return: Same shape with softmax applied across the chosen dimension
+        (So if dim -1 softmax will be applied across the columns, meaning each row will be softmaxed)
         """
         # Shift the input by the maximum value to prevent overflow and imprecision from floats. Basically, `e**input` can be very large
         # and softmax only cares about relative magnitude. So shifting everything over equally prevents the overflow but
         # keeps the output the same. If there are large negative numbers its ok exponentiating by negatives gives you
         # a small number.
-        shifted = input_tensor - input_tensor.max(dim=-1, keepdim=True).values
+        shifted = input_tensor - input_tensor.max(dim=dim, keepdim=True).values
 
         # Scalar operation being applied to the whole tensor
         # input_tensor_with_each_element_to_the_e = torch.e ** input_tensor
@@ -138,10 +164,11 @@ class softmax(torch.autograd.Function):
         # (In the divisor) For each row, sum across the columns, and keep the result as a column-shaped tensor.
         # `dim -1` is the dimension being summed across (you are summing across the columns here, thus condensing the rows into a single summed value).
         # Without `keepdim` it would flatten the values to one row, `keepdim` keeps each row here but with only its condensed value left.
-        result = input_tensor_with_each_element_to_the_e / input_tensor_with_each_element_to_the_e.sum(dim=-1, keepdim=True)
+        result = input_tensor_with_each_element_to_the_e / input_tensor_with_each_element_to_the_e.sum(dim=dim, keepdim=True)
 
         # Save the result because it is needed because softmax's derivative implementation in pytorch is wierd
         ctx.save_for_backward(result)
+        ctx.dim = dim
         return result
 
     @staticmethod
@@ -154,8 +181,8 @@ class softmax(torch.autograd.Function):
         return softmax_output * (
                 output_gradients
                 # Summed across columns (thus condensing each row into one value), keeping each row as its own row
-                - (output_gradients * softmax_output).sum(dim=-1, keepdim=True)
-        )
+                - (output_gradients * softmax_output).sum(dim=ctx.dim, keepdim=True)
+        ), None
 
 class layer_normalization(torch.autograd.Function):
     @staticmethod

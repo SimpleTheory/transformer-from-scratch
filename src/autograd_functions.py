@@ -1,26 +1,17 @@
 import torch
 from torch.autograd.function import FunctionCtx
+import math
 
 """
-(ChatGPT's Syllabus Instructions)
-If I were doing this project myself, I'd implement the Functions in roughly this order:
+--LinearFunction (wx_plus_b)
+--ReLUFunction
+--GeLUFunction
+--SiLUFunction
+--SoftmaxFunction
+--CrossEntropyFunction
+--LayerNormFunction
+--EmbeddingFunction
 
-LinearFunction (wx_plus_b)
-ReLUFunction
-SoftmaxFunction
-CrossEntropyFunction
-LayerNormFunction
-EmbeddingFunction
-
-Then build Modules:
-
-Linear
-LayerNorm
-Embedding
-FeedForward
-MultiHeadAttention
-TransformerBlock
-GPT
 """
 
 # TODO: Write doc strings on the concept of the shapes of gradients relative a functions outputs and inputs (maybe in readme)
@@ -419,7 +410,7 @@ class softmaxed_cross_entropy(torch.autograd.Function):
         index = targets.unsqueeze(-1)
         # (arg src) Make a -1 tensor with the same shape as the index
         # What the index and dim are telling you here is for each row on which column are we going to add that specific row's -1 (from src)
-        # since dim=columns here its for each row determine the column(s) being added to and you add the equivalent value from src (since index and src have the same dim)
+        # since dim=columns here it's for each row determine the column(s) being added to and you add the equivalent value from src (since index and src have the same dim)
         # in practice this indexes the target for each row and does -1 on its probability
         # The extra _ after `...add_` is pytorch convention for an inplace operation
         # Basically: probability -= target
@@ -444,4 +435,81 @@ class softmaxed_cross_entropy(torch.autograd.Function):
 
         # Targets has no gradient so this is the return
         return probabilities, None
+
+class gelu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_tensor: torch.Tensor):
+        """
+        GELU(x) = x * cdf(x)
+
+        (This implementation of cdf is done because as of now pytorch doesn't have a quick built-in cdf function, but
+        it does have a similar function `erf` which you can use to get `cdf`), thus:
+
+        cdf = 0.5 * (1 + erf(x / sqrt(2)))
+
+        :param input_tensor: Any shape tensor
+        :return: Same shape tensor
+        """
+
+        cdf = 0.5 * (1.0 + torch.erf(input_tensor / math.sqrt(2.0)))
+        ctx.save_for_backward(input_tensor, cdf)
+        return input_tensor * cdf
+
+    @staticmethod
+    def backward(ctx, output_gradients: torch.Tensor):
+        """
+        d/dx GELU(x) = cdf(x) + x * pdf(x)
+
+        The important intuition is that the forward output is:
+            output = x * cdf
+        So by the product rule:
+            d_output/dx = cdf + x * d_cdf/dx
+        And because the derivative of CDF (which is d_cdf/dx) is the PDF:
+            d_gelu = cdf + x * pdf
+        the formula for pdf is:
+            pdf = 1/sqrt(2π) * exp(-x^2 / 2)
+
+        :param output_gradients: Same shape as forward output
+        :return: Same shape as input_tensor
+        """
+
+        input_tensor, cdf = ctx.saved_tensors
+        pdf = (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * input_tensor ** 2)
+        gradient_input = output_gradients * (cdf + input_tensor * pdf)
+        return gradient_input
+
+class silu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_tensor):
+        """
+        SiLU(x) = x * sigmoid(x)
+        :param input_tensor: Any tensor
+        :return: Tensor with same shape as input_tensor
+        """
+        # In real production code, torch.sigmoid(input_tensor) is usually better because it is more numerically stable and optimized.
+        # sigmoid formula == 1 / (1 + e**-x)
+        sigmoided_tensor = 1/(1 + torch.exp(-input_tensor))
+        ctx.save_for_backward(input_tensor, sigmoided_tensor)
+        return input_tensor * sigmoided_tensor
+
+    @staticmethod
+    def backward(ctx, output_gradients):
+        """
+        d/dx x * sigmoid(x)
+
+        Product rule:
+            1 * sigmoid(x) + x * sigmoid'(x)
+        sigmoid'(x):
+            sigmoid(x) * (1 - sigmoid(x))
+        Therefore:
+            SiLU'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+
+        :param ctx:
+        :param output_gradients: Same shape as forward output
+        :return: Same shape as input
+        """
+        input_tensor, sigmoided_tensor = ctx.saved_tensors
+        silu_derivative = sigmoided_tensor + input_tensor * sigmoided_tensor * (1 - sigmoided_tensor)
+        return input_tensor * silu_derivative
+
 

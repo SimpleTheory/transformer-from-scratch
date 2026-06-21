@@ -106,7 +106,7 @@ class EmbeddingLayer(torch.nn.Module):
 class SingleHeadAttention(torch.nn.Module):
     def __init__(self, embedding_dim: int, columns: int = None):
         """
-
+        Todo write doc comments explaining single head attention
         :param embedding_dim:
         :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
         the embedding_dim value
@@ -147,12 +147,12 @@ class SingleHeadAttention(torch.nn.Module):
         # Scaled by the size of the hidden space (for some reason)
         attention_matrix /= math.sqrt(self.columns)
         if mask:
-            attention_matrix = self.apply_mask(attention_matrix)
+            attention_matrix = apply_mask(attention_matrix)
         # Apply softmax to get a score for each token x token that the value matrix can use
         attention_matrix = autograd_functions.softmax.apply(attention_matrix, dim=-1)
         return attention_matrix @ value
 
-    def apply_mask(self, attention_matrix: torch.Tensor) -> torch.Tensor:
+def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
         # Attention matrix is (.. ,seq_len, seq_len)
         sequence_length = attention_matrix.shape[-1]
         # Shape: (T, T)

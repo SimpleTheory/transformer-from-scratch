@@ -37,8 +37,9 @@ Notes:
 
 """
 class LinearLayer(torch.nn.Module):
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(self, in_features: int, out_features: int, initialization_scaling: float = None):
         """
+        Layer initialization defaults to `1/sqrt(in_features)`
         Layer wx+b where
             x (..., in_features)
             w (out_features, in_features)
@@ -51,32 +52,40 @@ class LinearLayer(torch.nn.Module):
 
         """
         super().__init__()
-        # Todo layer initialization because randn's std is too big leading to big gradients and inefficient learning
+        # Layer initialization because randn's std is too big leading to big gradients and inefficient learning
         # Generic layer init is torch.randn(...) / sqrt(in_features)
-        # Since relu makes it smaller by about half with relu it tends to be ... * (2/sqrt(in_features))
-        # TODO Maybe pass in a dynamic scaling to multiply the matrix by?
-        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features))
+        if initialization_scaling is None:
+            initialization_scaling = 1 / math.sqrt(in_features)
+        self.initialization_scaling = initialization_scaling
+        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features)) * initialization_scaling
         self.biases = torch.nn.Parameter(torch.zeros(out_features))
 
     def forward(self, inputs: torch.Tensor):
         return autograd_functions.wx_plus_b.apply(inputs, self.weights, self.biases)
 
 class DoubleLinearApplied(torch.nn.Module):
-    def __init__(self, in_columns: int, intermediate_columns: int, out_columns: int, activation_func: torch.autograd.Function = autograd_functions.gelu):
+    def __init__(
+            self,
+            in_columns: int,
+            intermediate_columns: int,
+            out_columns: int,
+            activation_func: torch.autograd.Function = autograd_functions.gelu,
+            initialization_scaling: float = None
+    ):
         """
         A macro for a double linear layer with relu activation functions
         """
         super().__init__()
-        # TODO: Layer init scaling cf linear layer
+
         self.activation_func: torch.autograd.Function = activation_func
-        # Using kaiming he scaling because activation function will likely be relu or gelu
-        # Though really the init scaler here should be dynamic based off the activation function but shhh
-        self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns)) * (2/math.sqrt(in_columns))
+        # Using kaiming-he scaling because activation function will likely be relu or gelu
+        self.initialization_scaling = initialization_scaling if initialization_scaling is not None else (2/math.sqrt(in_columns))
+        self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns)) * self.initialization_scaling
         self.biases_first = torch.nn.Parameter(torch.zeros(intermediate_columns))
 
-        self.weights_second = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns))
         # Regular init scaling here because no activation function after
-        self.biases_second = torch.nn.Parameter(torch.zeros(out_columns)) / math.sqrt(intermediate_columns)
+        self.weights_second = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns)) / math.sqrt(intermediate_columns)
+        self.biases_second = torch.nn.Parameter(torch.zeros(out_columns))
 
     def forward(self, inputs: torch.Tensor):
         # Memory allocation might be inefficient here but this code is better for clarity in the meantime
@@ -100,7 +109,8 @@ class LayerNorm(torch.nn.Module):
 class EmbeddingLayer(torch.nn.Module):
     def __init__(self, vocab_size: int, embedding_dimensions: int):
         super().__init__()
-        # TODO Arbitrarily the randomized values to be lower for more stable gradients (gpt recommends .02)
+        # Scale the matrix by an arbitrary scalar for the randomized weights to be lower for more stable gradients (gpt recommends .02)
+        # Maybe parametrize it
         self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions)) * .02
 
     def forward(self, tokens):
@@ -129,7 +139,7 @@ class SingleHeadAttention(torch.nn.Module):
 
         # Need to have init dim be embedding_dim to @ the input
         # Also need to scale the randomly initialized weights for more stable training at the beginning
-        # TODO SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
+        # SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
         self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
@@ -207,7 +217,7 @@ class MultiHeadAttention(torch.nn.Module):
 
         # Need to have init dim be embedding_dim to @ the input
         # Also need to scale the randomly initialized weights for more stable training at the beginning
-        # TODO SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
+        # SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
         self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)

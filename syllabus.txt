@@ -17,7 +17,7 @@ Then build Modules:
 --Embedding
 --FeedForward
 --SingleHeadAttention
-MultiHeadAttention
+--MultiHeadAttention
 TransformerBlock
 GPT
 

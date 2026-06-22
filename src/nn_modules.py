@@ -73,7 +73,7 @@ class DoubleLinearApplied(torch.nn.Module):
             initialization_scaling: float = None
     ):
         """
-        A macro for a double linear layer with relu activation functions
+        A macro for a double linear layer with an activation function
         """
         super().__init__()
 

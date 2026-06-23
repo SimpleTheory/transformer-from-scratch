@@ -296,11 +296,20 @@ class MultiHeadAttention(torch.nn.Module):
         # AKA embedding_dim instead of columns if project_to_embedding_dim is True
         return autograd_functions.wx_plus_b.apply(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
 
+class TransformerBlock(torch.nn.Module):
+    def __init__(self):
+        # TODO 3 (doc comment)
+        super().__init__()
+        # TODO
+    def forward(self, input):
+        # TODO 2
+
+
 
 def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
-        # Attention matrix is (.. ,seq_len, seq_len)
+        # Attention matrix is (... , Sequence Length, Sequence Length)
         sequence_length = attention_matrix.shape[-1]
-        # Shape: (T, T)
+        # Shape: (Sequence Length, Sequence Length)
         # .tril() stands for lower triangle, it divides the matrix in half across the diagonal and everything in the
         # upper right half is set to 0 by default, here because dtype=bool it is set to false
         # torch.tril(torch.ones(4, 4, dtype=torch.bool)) becomes:
@@ -314,7 +323,7 @@ def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
         # and the second token in the second row can look at itself and the last one etc.
         mask = torch.tril(torch.ones(sequence_length, sequence_length, device=attention_matrix.device, dtype=torch.bool))
 
-        # Broadcasts from (T, T) to (B, T, T)
+        # Broadcasts from (Sequence Length, Sequence Length) to (Batch Size, Sequence Length, Sequence Length)
         # ~ Means not so it will flip the matrix
         #   So:
         #     [True, False, False]        [False,  True,  True]

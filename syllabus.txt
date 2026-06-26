@@ -18,6 +18,7 @@ Then build Modules:
 --FeedForward
 --SingleHeadAttention
 --MultiHeadAttention
+--MoEFeedForward
 TransformerBlock
 GPT
 

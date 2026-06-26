@@ -15,6 +15,13 @@ import math
 """
 
 # TODO: Write doc strings on the concept of the shapes of gradients relative a functions outputs and inputs (maybe in readme)
+"""
+For any given function the shape of the gradients (backward's output) must match the shape of the inputs (forward's arguments)
+because of this pytorch enforces it such that even the order of the outputs must match forward's inputs 1 to 1
+
+Likewise, and for the same reasons, the result forward's output will always be
+the same shape as the incoming gradients (backward's output_gradient).
+"""
 
 
 class relu(torch.autograd.Function):

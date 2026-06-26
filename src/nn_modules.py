@@ -8,6 +8,7 @@ import math
 --Linear
 --LayerNorm
 --FeedForward
+--MoEFeedForward
 --Embedding
 --SingleHead Attention
 --MultiHeadAttention
@@ -79,7 +80,7 @@ class DoubleLinearApplied(torch.nn.Module):
 
         self.activation_func: torch.autograd.Function = activation_func
         # Using kaiming-he scaling because activation function will likely be relu or gelu
-        self.initialization_scaling = initialization_scaling if initialization_scaling is not None else (2/math.sqrt(in_columns))
+        self.initialization_scaling = initialization_scaling if initialization_scaling is not None else (math.sqrt(2/in_columns))
         self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns)) * self.initialization_scaling
         self.biases_first = torch.nn.Parameter(torch.zeros(intermediate_columns))
 
@@ -94,6 +95,143 @@ class DoubleLinearApplied(torch.nn.Module):
         result = autograd_functions.wx_plus_b.apply(intermediate_space, self.weights_second, self.biases_second)
         # result = autograd_functions.relu.apply(result)
         return result
+
+class MoEDoubleLinearApplied(torch.nn.Module):
+    def __init__(self,
+                 total_number_of_experts: int,
+                 experts_to_accept: int,
+                 in_columns: int,
+                 intermediate_columns: int,
+                 activation_func: torch.autograd.Function = autograd_functions.gelu,
+                 out_columns: int = None,
+                 initialization_scaling: float = None
+                 ):
+        super().__init__()
+        # Keep dimensionality by default for residuals
+        if out_columns is None:
+            out_columns = in_columns
+        # Kaiming initialization for gelu style default activation functions
+        if initialization_scaling is None:
+            initialization_scaling = math.sqrt(2/in_columns)
+        if experts_to_accept > total_number_of_experts:
+            raise ValueError(f"{experts_to_accept=} cannot be greater than {total_number_of_experts=}")
+        self.total_number_of_experts = total_number_of_experts
+        self.experts_to_accept = experts_to_accept
+        self.in_columns = in_columns
+        self.intermediate_columns = intermediate_columns
+        self.activation_func = activation_func
+        self.out_columns = out_columns
+        self.initialization_scaling = initialization_scaling
+        # This must be a ModuleList so PyTorch registers the experts' parameters.
+        # Otherwise, optimizer.parameters(), state_dict(), etc. will not include them.
+        self.experts = torch.nn.ModuleList([
+            DoubleLinearApplied(in_columns, intermediate_columns, out_columns, activation_func, initialization_scaling)
+            for _ in range(total_number_of_experts)
+        ])
+        self.gate = LinearLayer(in_columns, total_number_of_experts)
+
+    def forward(self, input_tensor):
+        """
+        :param input_tensor: Batch Size, Sequence Length, Embedding Dimensions
+        :return: Batch Size, Sequence Length, Out Columns
+        """
+        batch_size, sequence_length, embedding_dims = input_tensor.shape
+        # Sanity check on input
+        if embedding_dims != self.in_columns:
+            raise ValueError(
+                f"Expected input last dimension {self.in_columns}, got {embedding_dims}"
+            )
+        # Reshape batch * seq_len (henceforth called N), embedding
+        n = batch_size * sequence_length
+        flattened_input = input_tensor.reshape(-1, embedding_dims)
+        # This will be (N, total_number_of_experts)
+            # We do this to get the scores for each element in the input
+        scores = self.gate(flattened_input)
+        # This will be (N, number_of_experts_to_use)
+        # The filtered scores are the k highest scores
+        # We take their row index (as in the indexes of the values of that specific row)
+        # because that will be the same index of the expert in self.experts
+        filtered_scores, index_of_expert_to_use = torch.topk(
+            scores,
+            k=self.experts_to_accept,
+            dim=-1,
+        )
+        # Once filtered we convert the values to weights of how much that expert should apply
+        weights_per_expert_per_n = autograd_functions.softmax.apply(filtered_scores, dim=-1)
+
+        # The idea in the next segment is we want to flatten everything because the same token will be routed to many different places
+        # We want it such that we can have a data structure that can keep track of:
+            # 1. Which element it was (token_indices)
+            # 2. Which expert to use (flattened_expert_index)
+            # 3. What weight to apply to the result (flattened_weights)
+        # This works because we are making three tables with identical sizes (n, num_of_experts_to_use)
+
+        token_indices = (
+            # Like Python range(n)
+            torch.arange(n, device=input_tensor.device)
+            # Turn the range into a column (so (n,) -> (n,1))
+            .unsqueeze(1)
+            # This method takes a dimension of 1 and duplicates x times (though this is done as a view to save memory)
+            # So now you will have `experts_to_accept` copies of the range column
+            .expand(n, self.experts_to_accept)
+            # Flatten the range to one dimension so if `experts_to_accept` was 3 then [0,0,0,1,1,1,...]
+            .reshape(-1)
+        )
+        flattened_weights = weights_per_expert_per_n.reshape(-1)
+        flattened_expert_index = index_of_expert_to_use.reshape(-1)
+
+        # We can then sort each of them by the experts
+        # and then batch by expert for efficiency reasons
+        sort_index = torch.argsort(flattened_expert_index)
+        token_indices = token_indices[sort_index]
+        flattened_weights = flattened_weights[sort_index]
+        flattened_expert_index = flattened_expert_index[sort_index]
+
+        # Gets the count for each index at its position replacing misses with a 0
+        # For example say total experts is 5
+            # flattened expert index [2, 3, 4, 0, 0, 0, 3]
+            # return [3, 0, 1, 2, 1]
+            #         0  1  2  3  4  -- it is the count of how often the indices show up in the source
+        # We need this basically to use slicing to batch by the experts, if I know 3 elements are going to expert 0
+        # Then I can slice each of the tensors equally by 3
+        hits_per_expert = torch.bincount(
+            flattened_expert_index,
+            minlength=self.total_number_of_experts,
+        ).tolist()
+
+        # Create an output buffer
+        result = torch.zeros(n, self.out_columns, device=input_tensor.device, dtype=input_tensor.dtype)
+
+        start = 0
+        for current_expert, hits in enumerate(hits_per_expert):
+            if hits == 0:
+                continue
+            # Create a slice object for the current expert
+            end = start + hits
+            current_slice = slice(start, start + hits)
+
+            # Slice `token_indices` list and `flattened_weights` list as mentioned above using the above slice obj
+            current_token_indices = token_indices[current_slice]
+            current_flattened_weights = flattened_weights[current_slice]
+            # This is the list of the actual token vectors retrieved via the token_index
+            tokens_sent_to_this_expert = flattened_input[current_token_indices]  # (hits, embedding_dim)
+
+            # Get the experts output and apply the weight
+            current_expert_output = self.experts[current_expert](tokens_sent_to_this_expert)  # (hits, out_columns) ideally embedding_dim
+            current_expert_output *= current_flattened_weights.unsqueeze(-1)  # Columnize them because its one weight per row
+
+            # At each token's index add its output to that index in the buffer
+            result.index_add_(
+                dim=0,
+                index=current_token_indices,
+                source=current_expert_output,
+            )
+
+            # Adjust the start for the next slice
+            start = end
+
+        # Reshape the buffer to (Batch Size, Sequence Length, Out Columns)
+        return result.reshape(batch_size, sequence_length, self.out_columns)
 
 class LayerNorm(torch.nn.Module):
     def __init__(self, trailing_dim_of_input: int):
@@ -127,7 +265,7 @@ class EmbeddingLayer(torch.nn.Module):
 class SingleHeadAttention(torch.nn.Module):
     def __init__(self, embedding_dim: int, columns: int = None):
         """
-        Todo write doc comments explaining single head attention
+        Todo write about the concepts behind single head attention
         :param embedding_dim:
         :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
         the embedding_dim value
@@ -138,8 +276,9 @@ class SingleHeadAttention(torch.nn.Module):
             raise ValueError(f'Dimension size must be over 0 {columns=}')
 
         # Need to have init dim be embedding_dim to @ the input
-        # Also need to scale the randomly initialized weights for more stable training at the beginning
-        # SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
+        # The randomly initialized weights are scaled for more stable training at the beginning
+        # gpt recommends using the default scale of 1/sqrt(embedding dim aka the in_features)
+            # this is usually the default scale for weights that aren't passed through activation functions later
         self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
         self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
@@ -164,21 +303,24 @@ class SingleHeadAttention(torch.nn.Module):
             # (Seq Len, Columns) @ (Columns, Seq Len)
         # .transpose(-2, -1) transposes the 2nd to last dimension with the last dimension
             # so (768, 12, 4) -> (768, 4, 12)
-        # Seq Col @ Col Seq -> (Seq, Seq)
+        # (Seq Len, Columns) @ (Columns, Seq Len) -> (Seq, Seq)
         attention_matrix = query @ key.transpose(-2, -1)
         # Scaled by the size of the hidden space (for some reason)
         attention_matrix /= math.sqrt(self.columns)
         if mask:
             attention_matrix = apply_mask(attention_matrix)
-        # Apply softmax to get a score for each token x token that the value matrix can use
+        # Apply softmax to get a score for each (token x token) that the value matrix can use
         attention_matrix = autograd_functions.softmax.apply(attention_matrix, dim=-1)
-        # Return (Batch Size, Sequence Length, Columns)
-        return attention_matrix @ value
+
+        # Multiply the scores of each token x token to the value matrix
+        # (batch_size, seq_len, seq_len) @ (batch_size, seq_len, columns)
+
+        return attention_matrix @ value  # Return (Batch Size, Sequence Length, Columns)
 
 class MultiHeadAttention(torch.nn.Module):
     def __init__(self, embedding_dim: int, num_of_heads: int, columns: int = None, project_to_embedding_dim: bool = True):
         """
-        Todo write doc comments explaining the concept behind multihead attention
+        Todo write about the concepts behind multihead attention
         :param embedding_dim: The embedding_dim/channels/hidden_space/whatever you want to call it of the input
         :param num_of_heads: The number of heads to split the columns to. The following must be true (self.columns % num_of_heads == 0)
         :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
@@ -250,17 +392,22 @@ class MultiHeadAttention(torch.nn.Module):
         value = value.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
 
         # Since heads are really just a second batch we need to move them back to do the operation on the hidden dimension
-        # aka dim_per_head and the sequence length, to still get an attention matrix (seq_len, seq_len) just over the
-        # number_of_dims given on that specific head. This is because the @ is batched over batch size and heads to do
-        # (..., seq_len, dim_per_head) @ (..., seq_len, dim_per_head).T
+        # aka dimensions_per_head. By doing this we can still get an attention matrix (seq_len, seq_len) just over the
+        # dimensions_per_head of that specific head.
+        #  This is because the @ is batched over batch size and heads to do
+        # (..., seq_len, dimensions_per_head) @ (..., seq_len, dimensions_per_head).T
+
         # Each is now (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        # Now we calculate the attention matrix (because this is batched over the batches and the num of heads, every single one
-        # is done in this line below). We have to transpose key to make the operation
+        # Now we calculate the attention matrix, because the key tensor and query tensor are double batched (over the batches, num of heads),
+        # every single attention matrix is computed in the line below.
+
+        # We have to transpose key to make the following operation valid:
         # (..., seq_len, dim_per_head) @ (..., dim_per_head, seq_len) -> (..., seq_len, seq_len)
+
         # The shape of this is (batch_size, num_of_heads, sequence_length, sequence_length)
         head_separated_attention_matrix = query @ key.transpose(-2, -1)
 
@@ -276,7 +423,7 @@ class MultiHeadAttention(torch.nn.Module):
         head_separated_attention_matrix = autograd_functions.softmax.apply(head_separated_attention_matrix, dim=-1)
 
         # Get the results per head
-        # Shape is (batch_size, num_of_heads, sequence_length, dimensions_per_head)
+        # Shape is (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
         head_separated_results = head_separated_attention_matrix @ value
 
         # Now we need to recombine the heads to get the full embedding dimension back (basically we separated them earlier,
@@ -291,19 +438,62 @@ class MultiHeadAttention(torch.nn.Module):
 
         # Multihead attention usually has a final linear layer to combine the results of all the heads and also to project
         # the output to an expected output like the embedding_dimension for the residual connections.
-        # (AKA just adding the result of this to the original input, but in order to do that they need to be the same shape).
+        # (Residual connections just means adding the result of this to the original input, but in order to do that they need to be the same shape).
         # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
         # AKA embedding_dim instead of columns if project_to_embedding_dim is True
         return autograd_functions.wx_plus_b.apply(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
 
 class TransformerBlock(torch.nn.Module):
-    def __init__(self):
-        # TODO 3 (doc comment)
+    # TODO class level doc comment
+    # Made with projecting back to the embedding dim in mind
+    def __init__(
+            self,
+            embedding_dimension: int,
+            num_of_heads: int,
+            columns: int = None,
+            skip_attention_layer_norm: bool = True
+    ):
+        # TODO init level doc comment explaining the params
+        # INCLUDE IN DOC COMMENT Columns % Num of heads must == 0
+        # INCLUDE IN DOC COMMENT Input should be (batch size, sequence length, embedding dimension)
         super().__init__()
-        # TODO
-    def forward(self, input):
-        # TODO 2
 
+        self.skip_attention_layer_norm = skip_attention_layer_norm
+        if not skip_attention_layer_norm:
+            self.layer_norm_1 = LayerNorm(embedding_dimension)
+
+        self.attention_block = MultiHeadAttention(embedding_dimension, num_of_heads, columns, True)
+        self.layer_norm_2 = LayerNorm(embedding_dimension)
+
+        # TODO Maybe use MoE feedforward? Though its params would have to be passed on to init
+        self.feed_forward = DoubleLinearApplied(embedding_dimension, embedding_dimension * 2, embedding_dimension)
+
+    def forward(self, input: torch.Tensor):
+        # Input must be size (Batch Size, Sequence Length, Embedding Dimensions)
+        # Create a copy to preserve original input for debugging
+        input_copy = input
+
+        # Residual connections: instead of taking the result as the next step in the pipeline we add it back to the input
+        # That way we have a build up of everything that came before and at least some context of what things were...allegedly
+        # Theoretically concatenation (adding the output as dimensions) would work, but it would blow up the size of the model
+        # While this has trade-offs it makes it easier to not overfit and keeps the model size low. This is done to every
+        # operation in the block, basically "preserving" everything that came before it. Because of that though, the sizes
+        # of the outputs and the input need to be the same.
+        if self.skip_attention_layer_norm:
+            # Don't apply layer norm on the first pass from the embeddings
+            input_copy = input_copy + self.attention_block(input_copy)
+
+        else:
+            # Residual connection, apply the multihead attention to the layer normalized input to stabilize it.
+            # This is needed in case of noise from the previous operations due to the residual connection concept.
+            input_copy = input_copy + self.attention_block(self.layer_norm_1(input_copy))
+
+        # Mix and expand the output from the attention with a linear layer then reproject it down to size `embedding_dim`
+        # with a second linear layer. Since the linear layers are connected to each other they are split with an activation
+        # function to introduce non-linearity. Otherwise, they'd be equivalent to one giga linear layer.
+        input_copy = input_copy + self.feed_forward(self.layer_norm_2(input_copy))
+
+        return input_copy
 
 
 def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:

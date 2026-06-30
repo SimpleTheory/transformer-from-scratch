@@ -3,7 +3,7 @@ If I were doing this project myself, I'd implement the Functions in roughly this
 --LinearFunction (wx_plus_b)
 --ReLUFunction
 --SoftmaxFunction
-CrossEntropyFunction (Need to make modular)
+--CrossEntropyFunction
 --LayerNormFunction
 --EmbeddingFunction
 --Gelu

@@ -385,6 +385,8 @@ class cross_entropy(torch.autograd.Function):
 
         probabilities: (Batch, Classes)
         targets: (Batch, Classes)
+        ctx.reduction: String-Enum the type of reduction used
+        ctx.target_type: 'distribution' or 'indices' - what kind of target tensor it is whether one-hot or class index
         :param output_gradients: (Batch,)
         :return: gradient_probabilities (Batch, Class), None, None
             (Targets don't need gradients they are the expected value)
@@ -442,7 +444,7 @@ class cross_entropy(torch.autograd.Function):
             raise RuntimeError(f"Unexpected reduction: {ctx.reduction}")
         return gradient_probabilities, None, None
 
-def cross_entropy_with_kwarg(probabilities: torch.Tensor, targets: torch.Tensor,reduction: str = "mean"):
+def cross_entropy_with_kwarg(probabilities: torch.Tensor, targets: torch.Tensor, reduction: str = "mean"):
     return cross_entropy.apply(probabilities, targets, reduction)
 
 class softmaxed_cross_entropy(torch.autograd.Function):

@@ -1,10 +1,9 @@
 (ChatGPT's Syllabus Instructions)
 If I were doing this project myself, I'd implement the Functions in roughly this order:
-
 --LinearFunction (wx_plus_b)
 --ReLUFunction
 --SoftmaxFunction
---CrossEntropyFunction
+CrossEntropyFunction (Need to make modular)
 --LayerNormFunction
 --EmbeddingFunction
 --Gelu
@@ -19,8 +18,10 @@ Then build Modules:
 --SingleHeadAttention
 --MultiHeadAttention
 --MoEFeedForward
-TransformerBlock
-GPT
+--TransformerBlock
+--GPT
 
+Then other necessary objects:
+AdamW
 
 Then assemble into a model:

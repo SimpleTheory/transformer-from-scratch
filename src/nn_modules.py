@@ -35,6 +35,7 @@ Notes:
                 W = torch.randn(in_features, out_features) * math.sqrt(2 / in_features)
             etc...
     The reason being that the activation function gates a lot of the output so the initial scale should be different
+    Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status
 
 """
 class LinearLayer(torch.nn.Module):
@@ -58,7 +59,7 @@ class LinearLayer(torch.nn.Module):
         if initialization_scaling is None:
             initialization_scaling = 1 / math.sqrt(in_features)
         self.initialization_scaling = initialization_scaling
-        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features)) * initialization_scaling
+        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features) * initialization_scaling)
         self.biases = torch.nn.Parameter(torch.zeros(out_features))
 
     def forward(self, inputs: torch.Tensor):
@@ -81,11 +82,11 @@ class DoubleLinearApplied(torch.nn.Module):
         self.activation_func: torch.autograd.Function = activation_func
         # Using kaiming-he scaling because activation function will likely be relu or gelu
         self.initialization_scaling = initialization_scaling if initialization_scaling is not None else (math.sqrt(2/in_columns))
-        self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns)) * self.initialization_scaling
+        self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns) * self.initialization_scaling)
         self.biases_first = torch.nn.Parameter(torch.zeros(intermediate_columns))
 
         # Regular init scaling here because no activation function after
-        self.weights_second = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns)) / math.sqrt(intermediate_columns)
+        self.weights_second = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns) / math.sqrt(intermediate_columns))
         self.biases_second = torch.nn.Parameter(torch.zeros(out_columns))
 
     def forward(self, inputs: torch.Tensor):
@@ -148,8 +149,8 @@ class MoEDoubleLinearApplied(torch.nn.Module):
             # We do this to get the scores for each element in the input
         scores = self.gate(flattened_input)
         # This will be (N, number_of_experts_to_use)
-        # The filtered scores are the k highest scores
-        # We take their row index (as in the indexes of the values of that specific row)
+        # The filtered scores are the k highest scores so: [0, .1, .2, .3, .4] where k=2 -> [.3, .4] & [3, 4]
+        # We take their row index (as in the indices of the values of that specific row)
         # because that will be the same index of the expert in self.experts
         filtered_scores, index_of_expert_to_use = torch.topk(
             scores,
@@ -157,7 +158,7 @@ class MoEDoubleLinearApplied(torch.nn.Module):
             dim=-1,
         )
         # Once filtered we convert the values to weights of how much that expert should apply
-        weights_per_expert_per_n = autograd_functions.softmax.apply(filtered_scores, dim=-1)
+        weights_per_expert_per_n = autograd_functions.softmax_with_kwarg(filtered_scores, dim=-1)
 
         # The idea in the next segment is we want to flatten everything because the same token will be routed to many different places
         # We want it such that we can have a data structure that can keep track of:
@@ -208,7 +209,7 @@ class MoEDoubleLinearApplied(torch.nn.Module):
                 continue
             # Create a slice object for the current expert
             end = start + hits
-            current_slice = slice(start, start + hits)
+            current_slice = slice(start, end)
 
             # Slice `token_indices` list and `flattened_weights` list as mentioned above using the above slice obj
             current_token_indices = token_indices[current_slice]
@@ -218,7 +219,7 @@ class MoEDoubleLinearApplied(torch.nn.Module):
 
             # Get the experts output and apply the weight
             current_expert_output = self.experts[current_expert](tokens_sent_to_this_expert)  # (hits, out_columns) ideally embedding_dim
-            current_expert_output *= current_flattened_weights.unsqueeze(-1)  # Columnize them because its one weight per row
+            current_expert_output = current_expert_output * current_flattened_weights.unsqueeze(-1)  # Columnize them because its one weight per row
 
             # At each token's index add its output to that index in the buffer
             result.index_add_(
@@ -245,11 +246,11 @@ class LayerNorm(torch.nn.Module):
         return autograd_functions.layer_normalization.apply(inputs, self.weights, self.biases)
 
 class EmbeddingLayer(torch.nn.Module):
-    def __init__(self, vocab_size: int, embedding_dimensions: int):
+    def __init__(self, vocab_size: int, embedding_dimensions: int, initializer=.02):
         super().__init__()
         # Scale the matrix by an arbitrary scalar for the randomized weights to be lower for more stable gradients (gpt recommends .02)
         # Maybe parametrize it
-        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions)) * .02
+        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions) * initializer)
 
     def forward(self, tokens):
         """
@@ -279,9 +280,9 @@ class SingleHeadAttention(torch.nn.Module):
         # The randomly initialized weights are scaled for more stable training at the beginning
         # gpt recommends using the default scale of 1/sqrt(embedding dim aka the in_features)
             # this is usually the default scale for weights that aren't passed through activation functions later
-        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
-        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
-        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
+        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
+        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
+        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
 
         self.query_bias = torch.nn.Parameter(torch.zeros(self.columns))
         self.key_bias = torch.nn.Parameter(torch.zeros(self.columns))
@@ -294,9 +295,9 @@ class SingleHeadAttention(torch.nn.Module):
         :return: (Batch Size, Sequence Length, Columns)
         """
         # Each is now (Batch Size, Sequence Length, Columns)
-        query = autograd_functions.wx_plus_b.apply(inputs, self.query_weights, self.query_bias, normal=True)
-        key = autograd_functions.wx_plus_b.apply(inputs, self.key_weights, self.key_bias, normal=True)
-        value = autograd_functions.wx_plus_b.apply(inputs, self.value_weights, self.value_bias, normal=True)
+        query = autograd_functions.wx_plus_b_with_kwarg(inputs, self.query_weights, self.query_bias, normal=True)
+        key = autograd_functions.wx_plus_b_with_kwarg(inputs, self.key_weights, self.key_bias, normal=True)
+        value = autograd_functions.wx_plus_b_with_kwarg(inputs, self.value_weights, self.value_bias, normal=True)
 
         # The final attention matrix should be (Seq Len, Seq Len) (essentially every token by every token)
         # To get that we need to transpose either the Q or K (by convention the K) to get
@@ -305,12 +306,12 @@ class SingleHeadAttention(torch.nn.Module):
             # so (768, 12, 4) -> (768, 4, 12)
         # (Seq Len, Columns) @ (Columns, Seq Len) -> (Seq, Seq)
         attention_matrix = query @ key.transpose(-2, -1)
-        # Scaled by the size of the hidden space (for some reason)
-        attention_matrix /= math.sqrt(self.columns)
+        # Scaled by the size of the hidden space (for some reason)(, avoided inplace operation for pytorch debugging)
+        attention_matrix = attention_matrix / math.sqrt(self.columns)
         if mask:
             attention_matrix = apply_mask(attention_matrix)
         # Apply softmax to get a score for each (token x token) that the value matrix can use
-        attention_matrix = autograd_functions.softmax.apply(attention_matrix, dim=-1)
+        attention_matrix = autograd_functions.softmax_with_kwarg(attention_matrix, dim=-1)
 
         # Multiply the scores of each token x token to the value matrix
         # (batch_size, seq_len, seq_len) @ (batch_size, seq_len, columns)
@@ -360,11 +361,11 @@ class MultiHeadAttention(torch.nn.Module):
         # Need to have init dim be embedding_dim to @ the input
         # Also need to scale the randomly initialized weights for more stable training at the beginning
         # SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
-        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
-        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
-        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns)) / math.sqrt(embedding_dim)
+        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
+        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
+        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
         # Here the in feature is self.columns
-        self.final_linear_weights = torch.nn.Parameter(torch.randn(self.columns, self.final_linear_layer_projection_dimensions)) / math.sqrt(self.columns)
+        self.final_linear_weights = torch.nn.Parameter(torch.randn(self.columns, self.final_linear_layer_projection_dimensions) / math.sqrt(self.columns))
 
         self.query_bias = torch.nn.Parameter(torch.zeros(self.columns))
         self.key_bias = torch.nn.Parameter(torch.zeros(self.columns))
@@ -377,9 +378,9 @@ class MultiHeadAttention(torch.nn.Module):
             raise ValueError(f"Expected input last dim to be init's embedding_dim {self.embedding_dim}, got {inputs.shape[-1]}")
 
         # Each is now (Batch Size, Sequence Length, Columns)
-        query: torch.Tensor = autograd_functions.wx_plus_b.apply(inputs, self.query_weights, self.query_bias, normal=True)
-        key = autograd_functions.wx_plus_b.apply(inputs, self.key_weights, self.key_bias, normal=True)
-        value = autograd_functions.wx_plus_b.apply(inputs, self.value_weights, self.value_bias, normal=True)
+        query: torch.Tensor = autograd_functions.wx_plus_b_with_kwarg(inputs, self.query_weights, self.query_bias, normal=True)
+        key = autograd_functions.wx_plus_b_with_kwarg(inputs, self.key_weights, self.key_bias, normal=True)
+        value = autograd_functions.wx_plus_b_with_kwarg(inputs, self.value_weights, self.value_bias, normal=True)
 
         # Retrieve other useful info
         batch_size, sequence_length, columns = query.shape
@@ -413,14 +414,14 @@ class MultiHeadAttention(torch.nn.Module):
 
         # Normally you'd scale off of columns but because each mini batch (each head) has a hidden space of dimensions_per_head
         # you scale it off of that.
-        head_separated_attention_matrix /= math.sqrt(self.dimensions_per_head)
+        head_separated_attention_matrix = head_separated_attention_matrix / math.sqrt(self.dimensions_per_head)
 
         # Apply the mask
         if mask:
             head_separated_attention_matrix = apply_mask(head_separated_attention_matrix)
 
         # Softmax the attention matrices
-        head_separated_attention_matrix = autograd_functions.softmax.apply(head_separated_attention_matrix, dim=-1)
+        head_separated_attention_matrix = autograd_functions.softmax_with_kwarg(head_separated_attention_matrix, dim=-1)
 
         # Get the results per head
         # Shape is (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
@@ -441,7 +442,7 @@ class MultiHeadAttention(torch.nn.Module):
         # (Residual connections just means adding the result of this to the original input, but in order to do that they need to be the same shape).
         # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
         # AKA embedding_dim instead of columns if project_to_embedding_dim is True
-        return autograd_functions.wx_plus_b.apply(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
+        return autograd_functions.wx_plus_b_with_kwarg(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
 
 class TransformerBlock(torch.nn.Module):
     # TODO class level doc comment
@@ -451,22 +452,34 @@ class TransformerBlock(torch.nn.Module):
             embedding_dimension: int,
             num_of_heads: int,
             columns: int = None,
-            skip_attention_layer_norm: bool = True
+            # skip_attention_layer_norm: bool = True,
+            ff_intermediate_columns: int = None,
+            ff_total_experts: int = 8,
+            ff_experts_to_accept: int = 2
     ):
         # TODO init level doc comment explaining the params
         # INCLUDE IN DOC COMMENT Columns % Num of heads must == 0
         # INCLUDE IN DOC COMMENT Input should be (batch size, sequence length, embedding dimension)
         super().__init__()
 
-        self.skip_attention_layer_norm = skip_attention_layer_norm
-        if not skip_attention_layer_norm:
-            self.layer_norm_1 = LayerNorm(embedding_dimension)
+        # <editor-fold desc="Param Initialization">
+        # self.skip_attention_layer_norm = skip_attention_layer_norm
+        # if not skip_attention_layer_norm:
+        self.ff_intermediate_columns = embedding_dimension * 4 if ff_intermediate_columns is None else ff_intermediate_columns
+        # </editor-fold>
 
+        self.layer_norm_1 = LayerNorm(embedding_dimension)
         self.attention_block = MultiHeadAttention(embedding_dimension, num_of_heads, columns, True)
         self.layer_norm_2 = LayerNorm(embedding_dimension)
 
-        # TODO Maybe use MoE feedforward? Though its params would have to be passed on to init
-        self.feed_forward = DoubleLinearApplied(embedding_dimension, embedding_dimension * 2, embedding_dimension)
+        # Decide on which of these to use at first
+        self.feed_forward = DoubleLinearApplied(embedding_dimension, self.ff_intermediate_columns, embedding_dimension)
+        # self.feed_forward = MoEDoubleLinearApplied(
+        #     ff_total_experts,
+        #     ff_experts_to_accept,
+        #     embedding_dimension,
+        #     self.ff_intermediate_columns,
+        # )
 
     def forward(self, input: torch.Tensor):
         # Input must be size (Batch Size, Sequence Length, Embedding Dimensions)
@@ -479,14 +492,18 @@ class TransformerBlock(torch.nn.Module):
         # While this has trade-offs it makes it easier to not overfit and keeps the model size low. This is done to every
         # operation in the block, basically "preserving" everything that came before it. Because of that though, the sizes
         # of the outputs and the input need to be the same.
-        if self.skip_attention_layer_norm:
-            # Don't apply layer norm on the first pass from the embeddings
-            input_copy = input_copy + self.attention_block(input_copy)
 
-        else:
-            # Residual connection, apply the multihead attention to the layer normalized input to stabilize it.
-            # This is needed in case of noise from the previous operations due to the residual connection concept.
-            input_copy = input_copy + self.attention_block(self.layer_norm_1(input_copy))
+        # <editor-fold desc="Skip Attention Layer Logic (Commented Out)">
+        # if self.skip_attention_layer_norm:
+        #     # Don't apply layer norm on the first pass from the embeddings
+        #     input_copy = input_copy + self.attention_block(input_copy)
+
+        # else:
+        # </editor-fold>
+
+        # Residual connection, apply the multihead attention to the layer normalized input to stabilize it.
+        # This is needed in case of noise from the previous operations due to the residual connection concept.
+        input_copy = input_copy + self.attention_block(self.layer_norm_1(input_copy))
 
         # Mix and expand the output from the attention with a linear layer then reproject it down to size `embedding_dim`
         # with a second linear layer. Since the linear layers are connected to each other they are split with an activation
@@ -495,6 +512,156 @@ class TransformerBlock(torch.nn.Module):
 
         return input_copy
 
+class GPTModel(torch.nn.Module):
+    def __init__(
+            self,
+            vocab_size: int,
+            embedding_dimension: int,
+            max_sequence_length: int,
+            total_blocks: int,
+            num_heads: int,
+            ff_intermediate_columns_multiplier: int = 4,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.embedding_dimension = embedding_dimension
+        self.max_sequence_length = max_sequence_length
+        self.total_blocks = total_blocks
+        self.ff_intermediate_columns_multiplier = ff_intermediate_columns_multiplier
+
+        self.token_embeddings = EmbeddingLayer(vocab_size, embedding_dimension)
+        self.positional_embeddings = EmbeddingLayer(max_sequence_length, embedding_dimension)
+
+        self.transformer_blocks = torch.nn.ModuleList([
+            TransformerBlock(
+                embedding_dimension=embedding_dimension,
+                num_of_heads=num_heads,
+                ff_intermediate_columns=embedding_dimension * ff_intermediate_columns_multiplier
+                # skip_attention_layer_norm=False,
+            )
+            for _ in range(total_blocks)
+        ])
+        self.final_layer_norm = LayerNorm(embedding_dimension)
+        self.linear_to_vocab = LinearLayer(embedding_dimension, vocab_size)
+
+    def forward(self, inputs, expected_outputs=None):
+        """
+        token_ids
+          ↓
+        token embedding + positional embedding
+          ↓
+        TransformerBlocks
+          ↓
+        final LayerNorm
+          ↓
+        linear projection to vocab size
+          ↓
+        logits: (Batch Size, Sequence Length, Vocab Size)
+
+        the model returns:
+            logits.shape == (batch_size, sequence_length, vocab_size)
+        Each row along the last dimension is saying:
+            "For this token position, how likely is each possible next token?"
+        For example logits[0, 5] means:
+            The model's raw scores for the next token after position 5 in batch item 0.
+
+        :param inputs: (Batch Size, Sequence Length)
+            Contains integer token ids
+        :param expected_outputs: (Batch Size, Sequence Length)
+            Contains the correct next-token IDs.
+            Optional. If provided, we return loss too
+        :return: Tensor(Batch Size, Sequence Length, Vocab Size) | ..., loss: float
+        """
+        batch_size, sequence_length = inputs.shape
+        # Checking input to see if its valid
+        if sequence_length > self.max_sequence_length:
+            raise ValueError(
+                f"sequence_length={sequence_length} exceeds max_sequence_length={self.max_sequence_length}"
+            )
+        # Create a sequence with of the data length and then embed each thing in the sequence.
+        # So essentially you have an embedding for position 0, 1, 2, 3, etc...
+        # The idea being you can use this to represent position here its just done by adding it to the token embeddings,
+        # but really you can do anything. For example concatenate it and then project it to the needed size or anything you can imagine.
+        # Pytorch equivalent of [_ for _ in range(sequence_length)]
+        position_ids = torch.arange(sequence_length, device=inputs.device)
+
+        token_vectors = self.token_embeddings(inputs)
+        position_vectors = self.positional_embeddings(position_ids)
+        # (Batch Size, Sequence Length, Embedding Dimensions)
+        data_to_work_on = token_vectors + position_vectors
+        for block in self.transformer_blocks:
+            data_to_work_on = block(data_to_work_on)
+
+        # Normalize the data one more time and project to the vocab size to get the logits, where each
+        # logit represents: at the current batch for the current token position how likely is any of the next tokens
+        # in the vocab size.
+        # (Batch Size, Sequence Length, Vocab Size)
+        final_logits = self.linear_to_vocab(
+            self.final_layer_norm(data_to_work_on)
+        )
+        if expected_outputs is None:
+            return final_logits
+
+        # The loss is a scalar averaged over each token and over all the batches
+        loss = autograd_functions.softmaxed_cross_entropy.apply(final_logits, expected_outputs)
+        return final_logits, loss
+
+    @torch.no_grad()
+    def generate(
+            self,
+            token_ids: torch.Tensor,
+            max_new_tokens: int,
+    ):
+        """
+        For a single prompt batch size should be 1.
+
+        token_ids:
+            Shape: (batch_size, current_sequence_length)
+        Returns:
+            Shape: (batch_size, current_sequence_length + max_new_tokens)
+        """
+
+        for _ in range(max_new_tokens):
+            # How indexing works for tensors is each argument is another dimension
+            # So for instance in a 2D tensor, tensor[3, 5] means take the element at the third row and the 5th column.
+            # Likewise, you can also apply slices to these elements so in the same vein tensor[3, :] means take all the columns of the 3rd row
+            # In this case tokens is (batch_size, current_sequence_length) so this means
+                # Over all the batches (which are the rows thus the first :) slice the columns up to -self.max_sequence_length
+                # Effectively cropping the batches to the max sequence length in case they are longer than that
+            # This is important since by generating a response we are effectively "lengthening" the sequence length as well
+            token_ids_cropped = token_ids[:, -self.max_sequence_length:]
+
+            # (Batch Size, Sequence Length, Vocab Size)
+            # For example logits[0, 5] means: The model's raw scores for the next token after position 5 in batch item 0.
+            # self(...) works because you are essentially just calling the model this is a part of.
+            next_token_scores = self(token_ids_cropped)
+
+            # Again same tensor indexing paradigm
+            # 1. Over all the batches, 2. Take the last part of the sequence, 3. and grab the scores for the next token across the whole vocab size
+            # (Batch Size, Vocab Size)
+            last_token_scores = next_token_scores[:, -1, :]
+
+            # We do softmax to do log based probabilities because the model is based off of that
+            next_token_probabilities = autograd_functions.softmax_with_kwarg(last_token_scores, dim=-1)
+
+            # How torch.multinomial works is for 1D it samples (weighted random) that list, for 2D it samples every row
+            # Additionally, the sample returns as the index.
+            # Here for (Batch Size, Vocab Size) you get one sample for every batch.
+            # And then it returns the index of the sampled item, which just so happens to equal the token id.
+            # This in turn effectively gives the next token over any given batch's probability range
+            # For example if a batch has probability [.1, .2, .7] one of those items relative the weights will be chosen:
+                # With the above batch -> 0 10%, 1 20%, 2 70%
+            next_token = torch.multinomial(next_token_probabilities, num_samples=1)
+
+            # Here we add the new token to the original token_ids over every batch, so that the next iteration of the loop
+            # can use this new modified token ids to make its guess.
+            # Cat here is specifically (batch size, 1) catting to (batch size, sequence length) so its adding 1 (aka the new token)
+            # to sequence length.
+            token_ids = torch.cat([token_ids, next_token], dim=1)
+
+        # Now we return the token ids with all the new tokens in them. For actually displaying the results though like on
+        # a chatbot you could hide the original prompt or the whole context with some regular code.
+        return token_ids
 
 def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
         # Attention matrix is (... , Sequence Length, Sequence Length)

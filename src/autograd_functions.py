@@ -132,6 +132,10 @@ class wx_plus_b(torch.autograd.Function):
         # None is for the normal parameter
         return grad_inputs.reshape(inputs.shape), grad_weights, grad_biases, None
 
+def wx_plus_b_with_kwarg(inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor, normal: bool = False):
+    # Need this because you can't use `.apply` with kwargs
+    return wx_plus_b.apply(inputs, weights, biases, normal)
+
 class softmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_tensor: torch.Tensor, dim: int = -1):
@@ -181,6 +185,10 @@ class softmax(torch.autograd.Function):
                 # Summed across columns (thus condensing each row into one value), keeping each row as its own row
                 - (output_gradients * softmax_output).sum(dim=ctx.dim, keepdim=True)
         ), None
+
+def softmax_with_kwarg(input_tensor: torch.Tensor, dim: int = -1):
+    # Need this because you can't use `.apply` with kwargs
+    return softmax.apply(input_tensor, dim)
 
 class layer_normalization(torch.autograd.Function):
     @staticmethod
@@ -299,6 +307,11 @@ class embedding_function(torch.autograd.Function):
         return None, embedding_gradients
 
 class cross_entropy(torch.autograd.Function):
+    # (According to ChatGPT) TODO This is currently not flexible nor modular bc it assumes:
+        # probabilities.shape == (batch, classes)
+        # targets.shape == (batch, classes)
+        # dim == -1
+        # reduction == "mean"
     @staticmethod
     def forward(ctx, probabilities, targets):
         """
@@ -313,7 +326,7 @@ class cross_entropy(torch.autograd.Function):
         :param ctx:
         :param probabilities: (Batch, Classes) Output probabilities from the model
         :param targets: (Batch, Classes) Tensor with 0s for everything except 1 on target
-        :return: (Batch,) One loss score per batch
+        :return: Scalar mean of ((Batch,) One loss score per batch)
         """
         ctx.save_for_backward(probabilities, targets)
         return -(targets * probabilities.log()).sum(dim=-1).mean()
@@ -338,7 +351,10 @@ class cross_entropy(torch.autograd.Function):
         :return: gradient_probabilities (Batch, Class), None (Targets don't need gradients they are the expected value)
         """
         probabilities, targets = ctx.saved_tensors
-        gradient_probabilities = output_gradients.unsqueeze(-1) * (-targets / probabilities)
+        # Get the total number of items per batch and divide by that for the derivative of the mean done in forward
+        # (each element's loss in the batch effects the mean loss by that much)
+        num_items = math.prod(probabilities.shape[:-1])
+        gradient_probabilities = output_gradients.unsqueeze(-1) * (-targets / probabilities) / num_items
 
         return gradient_probabilities, None
 
@@ -517,6 +533,6 @@ class silu(torch.autograd.Function):
         """
         input_tensor, sigmoided_tensor = ctx.saved_tensors
         silu_derivative = sigmoided_tensor + input_tensor * sigmoided_tensor * (1 - sigmoided_tensor)
-        return input_tensor * silu_derivative
+        return output_gradients * silu_derivative
 
 

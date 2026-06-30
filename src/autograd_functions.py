@@ -307,13 +307,19 @@ class embedding_function(torch.autograd.Function):
         return None, embedding_gradients
 
 class cross_entropy(torch.autograd.Function):
-    # (According to ChatGPT) TODO This is currently not flexible nor modular bc it assumes:
-        # probabilities.shape == (batch, classes)
-        # targets.shape == (batch, classes)
-        # dim == -1
-        # reduction == "mean"
     @staticmethod
-    def forward(ctx, probabilities, targets):
+    def reduce_loss(loss_per_item: torch.Tensor, reduction: str):
+        if reduction == "mean":
+            return loss_per_item.mean()
+        elif reduction == "sum":
+            return loss_per_item.sum()
+        elif reduction == "none":
+            return loss_per_item
+        else:
+            raise ValueError(f"Invalid reduction: {reduction}")
+
+    @staticmethod
+    def forward(ctx, probabilities, targets, reduction: str = "mean"):
         """
         Basically what's happening in the formula everything is going to cancel out except for the target ()
         then you take the natural log of the target's probability * -1 (The negative is because a log of decimals gives
@@ -323,13 +329,45 @@ class cross_entropy(torch.autograd.Function):
         tldr: sum(-target * ln(probability)) (where target on everything but 1 element is 0)
         tldrest: -ln(correct_probability)
 
-        :param ctx:
-        :param probabilities: (Batch, Classes) Output probabilities from the model
-        :param targets: (Batch, Classes) Tensor with 0s for everything except 1 on target
-        :return: Scalar mean of ((Batch,) One loss score per batch)
+        :param probabilities: (..., Classes) Output probabilities from the model
+        :param targets: (..., Classes) | (...,) Tensor with 0s for everything except 1 on target, or an int index re the correct class
+        :param reduction: string-enum('mean', 'sum', 'none') In what way the loss should be reduced over the batches
+        :return: Reduction of ((Batch,) One loss score per batch), depending on the reduction used
         """
+        reduction = reduction.lower().strip()
         ctx.save_for_backward(probabilities, targets)
-        return -(targets * probabilities.log()).sum(dim=-1).mean()
+        ctx.reduction = reduction
+
+        # One-hot or soft-label target distribution
+        if targets.shape == probabilities.shape:
+            ctx.target_type = "distribution"
+            loss_per_item = -(targets * probabilities.log()).sum(dim=-1)
+        # Class Index Target
+        # If it has one less dimension (since the one hot vector is now a scalar)
+        elif targets.shape == probabilities.shape[:-1]:
+            # For Class Index targets, the indices must be an int type or pytorch crashes, so catch that.
+            if targets.dtype not in (torch.long, torch.int64, torch.int32):
+                raise TypeError(f"Class-index targets must be an integer tensor, but is currently {targets.dtype=}")
+            ctx.target_type = "indices"
+
+            # .gather() -> “For each row/item, pick values from this tensor using indices from another tensor.”
+            correct_probabilities = probabilities.gather(
+                # Index over the columns (In each row pick the element corresponding the index of the column)
+                dim=-1,
+                # Cast to long because index must be an int (long = int64)
+                # Turn List of Correct targets (batch,) to column
+                # So that it selects the correct probabilities over every row of probabilities (batch, class)
+                index=targets.long().unsqueeze(-1)
+                # This gather is in a column at the moment in order for the method to work. But at the end we .squeeze(1)
+                # to return it to a list.
+            ).squeeze(-1)
+
+            # In order to do the above logic we didn't apply the - and the natural log from the formula
+            # -ln(correct_probability). So we have the correct probabilities, but now we need to apply this to them.
+            loss_per_item = -correct_probabilities.log()
+        else:
+            raise ValueError("targets must be one-hot/soft labels or class indices")
+        return cross_entropy.reduce_loss(loss_per_item, reduction)
 
     @staticmethod
     def backward(ctx, output_gradients):
@@ -348,15 +386,64 @@ class cross_entropy(torch.autograd.Function):
         probabilities: (Batch, Classes)
         targets: (Batch, Classes)
         :param output_gradients: (Batch,)
-        :return: gradient_probabilities (Batch, Class), None (Targets don't need gradients they are the expected value)
+        :return: gradient_probabilities (Batch, Class), None, None
+            (Targets don't need gradients they are the expected value)
         """
         probabilities, targets = ctx.saved_tensors
-        # Get the total number of items per batch and divide by that for the derivative of the mean done in forward
-        # (each element's loss in the batch effects the mean loss by that much)
-        num_items = math.prod(probabilities.shape[:-1])
-        gradient_probabilities = output_gradients.unsqueeze(-1) * (-targets / probabilities) / num_items
+        if ctx.target_type == "distribution":
+            # targets has same shape as probabilities
+            # d/dp [-target * log(p)] = -target / p
+            gradient_probabilities = -targets / probabilities
 
-        return gradient_probabilities, None
+        elif ctx.target_type == "indices":
+            # targets has shape probabilities.shape[:-1]
+            # Need gradient shape to match probabilities.
+            gradient_probabilities = torch.zeros_like(probabilities)
+
+            # Recalculate correct probabilities from forward
+            target_indices = targets.long()
+            correct_probabilities = probabilities.gather(
+                dim=-1,
+                index=target_indices.unsqueeze(-1),
+            ).squeeze(-1)
+
+            # Scatter sets the src at the specified index so here:
+            # (Over every batch) At a given row, at the index of (target) specified in the targets column (== to the current row)
+            # (Over every batch) Set the value at said index to be `-1/correct_probability_of_said_batch`
+
+            gradient_probabilities.scatter_(
+                dim=-1,
+                # The unsqueeze here is for the batches, basically you are doing a separate set operation for each batch
+                # But all the values of all the batches are represented here in these unsqueezes
+                index=target_indices.unsqueeze(-1),
+                src=(-1 / correct_probabilities).unsqueeze(-1),
+            )
+
+        else:
+            raise RuntimeError(f"Unknown target_type: {ctx.target_type}")
+        if ctx.reduction == "mean":
+            # Get the total number of items per batch and divide by that for the derivative of the mean done in forward
+            # (each element's loss in the batch effects the mean loss by that much)
+            num_items = math.prod(probabilities.shape[:-1])
+            gradient_probabilities = gradient_probabilities * output_gradients / num_items
+        elif ctx.reduction == "none":
+            # Just multiples the loss of each batch by the output gradient of said batch
+            # (need to turn the output gradient into a column to do each row aka batch of gradient probabilities)
+            # (Aka this is a broadcast multiplication over classes because
+            # gradient_probabilities.shape == (batch, classes) &
+            # output_gradients.unsqueeze(-1).shape == (batch, 1)
+            # So you are chaining each element with its specific batch's loss
+            gradient_probabilities = gradient_probabilities * output_gradients.unsqueeze(-1)
+        elif ctx.reduction == "sum":
+            # In the case of sum the gradient is already passed as is (each element effects the gradient by itself)
+            # so you just have to apply chain rule.
+            gradient_probabilities = gradient_probabilities * output_gradients
+        else:
+            raise RuntimeError(f"Unexpected reduction: {ctx.reduction}")
+        return gradient_probabilities, None, None
+
+def cross_entropy_with_kwarg(probabilities: torch.Tensor, targets: torch.Tensor,reduction: str = "mean"):
+    return cross_entropy.apply(probabilities, targets, reduction)
 
 class softmaxed_cross_entropy(torch.autograd.Function):
     @staticmethod

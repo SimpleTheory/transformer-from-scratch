@@ -8,6 +8,7 @@ If I were doing this project myself, I'd implement the Functions in roughly this
 --EmbeddingFunction
 --Gelu
 --Silu
+--Mask
 
 Then build Modules:
 
@@ -22,6 +23,17 @@ Then build Modules:
 --GPT
 
 Then other necessary objects:
-AdamW
+--AdamW
 
-Then assemble into a model:
+Then assemble into a script to train the model
+    Tokenizer
+    Training Loop
+    Generation Loop
+    Checkpoint Manager
+
+Modules to be added in the future:
+    RotaryEmbedding / RoPE
+    RMSNormFunction & Layer (replacement of LayerNorm)
+    Dropout Function & Layer
+    Model Config Obj?
+    Weight tying from embeddings to final linear projection to vocab size?

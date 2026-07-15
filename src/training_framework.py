@@ -67,6 +67,16 @@ def validate_optimizer_device(model, optimizer):
                 if torch.is_tensor(state) and state.device != param_device:
                     raise ValueError(f"Model is on {param_device}, but optimizer state is on {state.device}.")
 
+def create_loaders(training, *other_datasets, batch_size=32, shuffle=True):
+    result = []
+    for index, dataset in enumerate([training, *other_datasets]):
+        result.append(torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            # Drop last if training otherwise keep last
+            drop_last=True if index == 0 else False,))
+
 # </editor-fold>
 
 
@@ -98,11 +108,13 @@ class Arguments:
     #   or if you would like a read-out per epoch you can put that here
     epochal_update: Callable[['Arguments', int], None] = update_schedulers
     stop_condition: Callable[['Arguments', int], bool] = lambda args, epoch: False
-    from_existing_model: bool = False
     schedulers: list[torch.optim.lr_scheduler.LRScheduler] = field(default_factory=lambda: [])
+
+    from_existing_model: bool = False
+
+    device: torch.device = device
     best_validation_loss: float = float("inf")
     start_epoch: int = 0
-    device: torch.device = device
 
     _epochal_validation_loss: int = field(default=0, init=False)
     _epochal_num_of_items_evaluated: int = field(default=0, init=False)

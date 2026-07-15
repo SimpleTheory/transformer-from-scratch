@@ -2,7 +2,8 @@ from collections.abc import Sequence
 from pathlib import Path
 import tiktoken
 import torch
-from torch.utils.data import Dataset
+import random
+from torch.utils.data import Dataset, DataLoader
 
 
 class TransformerTextDataset(Dataset):
@@ -61,6 +62,47 @@ class TransformerTextDataset(Dataset):
         text = Path(path).read_text(encoding=file_encoding)
         return cls(text, context_length=context_length, **kwargs)
 
+    @classmethod
+    def create_splits(
+            cls,
+            texts,
+            context_length: int,
+            train_ratio: float = 0.90,
+            validation_ratio: float = 0.05,
+            seed: int = 42,
+            **dataset_kwargs,
+    ):
+        """Shuffle and split documents before creating token windows."""
+
+        texts = list(texts)
+        random.Random(seed).shuffle(texts)
+
+        test_ratio = 1.0 - train_ratio - validation_ratio
+
+        if min(train_ratio, validation_ratio, test_ratio) <= 0:
+            raise ValueError("All split ratios must be greater than zero.")
+
+        train_end = int(len(texts) * train_ratio)
+        validation_end = train_end + int(len(texts) * validation_ratio)
+
+        train_texts = texts[:train_end]
+        validation_texts = texts[train_end:validation_end]
+        test_texts = texts[validation_end:]
+
+        if not all((train_texts, validation_texts, test_texts)):
+            raise ValueError("Not enough documents for three non-empty splits.")
+
+        common_arguments = {
+            "context_length": context_length,
+            **dataset_kwargs,
+        }
+
+        return (
+            cls(train_texts, **common_arguments),
+            cls(validation_texts, **common_arguments),
+            cls(test_texts, **common_arguments),
+        )
+
     @property
     def vocabulary_size(self) -> int:
         return self.tokenizer.max_token_value + 1
@@ -94,3 +136,4 @@ class TransformerTextDataset(Dataset):
         targets = sequence[1:]
 
         return inputs, targets
+

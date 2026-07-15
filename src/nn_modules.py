@@ -544,7 +544,7 @@ class GPTModel(torch.nn.Module):
         self.final_layer_norm = LayerNorm(embedding_dimension)
         self.linear_to_vocab = LinearLayer(embedding_dimension, vocab_size)
 
-    def forward(self, inputs, expected_outputs=None):
+    def forward(self, inputs):
         """
         token_ids
           ↓
@@ -567,9 +567,6 @@ class GPTModel(torch.nn.Module):
 
         :param inputs: (Batch Size, Sequence Length)
             Contains integer token ids
-        :param expected_outputs: (Batch Size, Sequence Length)
-            Contains the correct next-token IDs.
-            Optional. If provided, we return loss too
         :return: Tensor(Batch Size, Sequence Length, Vocab Size) | ..., loss: float
         """
         batch_size, sequence_length = inputs.shape
@@ -599,12 +596,7 @@ class GPTModel(torch.nn.Module):
         final_logits = self.linear_to_vocab(
             self.final_layer_norm(data_to_work_on)
         )
-        if expected_outputs is None:
-            return final_logits
-
-        # The loss is a scalar averaged over each token and over all the batches
-        loss = autograd_functions.softmaxed_cross_entropy.apply(final_logits, expected_outputs)
-        return final_logits, loss
+        return final_logits
 
     @torch.no_grad()
     def generate(

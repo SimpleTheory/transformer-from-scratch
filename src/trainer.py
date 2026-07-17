@@ -1,3 +1,4 @@
+from datasets import load_dataset
 import dataset_code
 import training_framework
 import nn_modules
@@ -14,46 +15,55 @@ def project_root() -> Path:
 # loss = autograd_functions.softmaxed_cross_entropy.apply(final_logits, expected_outputs)
 # return final_logits, loss
 
+context_length = 2**8
 data_dir = project_root() / 'data'
-documents = [path.read_text(encoding="utf-8") for path in (data_dir / 'dataset').glob("*.txt")]
-
-context_length = 2**9
-
-training_set, validation_set, test_set = dataset_code.TransformerTextDataset.create_splits(
-    documents,
-    context_length,
-    train_ratio=.8,
-    validation_ratio=.1,
-    seed=30
-)
-training_loader, validation_loader, test_loader = training_framework.create_loaders(
-    training_set, validation_set, test_set
-)
-
-
-model = nn_modules.GPTModel(
-    vocab_size=training_set.vocabulary_size,
-    embedding_dimension=768,
-    max_sequence_length=context_length,
-    total_blocks=12,
-    num_heads=12,
-)
-
-skeleton = training_framework.Arguments(
-    model=training_framework.to_device(model),
-    loss_function=training_framework.to_device(autograd_functions.softmaxed_cross_entropy.apply),
-    optimizer=optimizer.AdamW(model.parameters()),
-    training_set=training_set,
-    validation_set=validation_set,
-    training_loader=training_loader,
-    validation_loader=validation_loader,
-    max_epochs=10_000,
-    save_path=data_dir / 'model/checkpoint.pt',
-    # epochal_update= ,
-    # stop_condition= ,
-    # schedulers= ,
-)
-
 
 if __name__ == '__main__':
+    ds = load_dataset("roneneldan/TinyStories")
+    training_set = dataset_code.TransformerTextDataset(
+        ds,
+        split="train",
+        text_column="text",  # Automatically inferred here
+        context_length=context_length,
+        stride=context_length // 2,
+        max_documents=10_000,  # Start small for a proof of concept
+        selection_seed=42,
+    )
+
+    validation_set = dataset_code.TransformerTextDataset(
+        ds,
+        split="validation",
+        context_length=context_length,
+        stride=context_length,
+        max_documents=1_000,
+        selection_seed=42,
+    )
+
+    training_loader, validation_loader = training_framework.create_loaders(
+        training_set, validation_set,  # test_set
+    )
+
+    model = nn_modules.GPTModel(
+        vocab_size=training_set.vocabulary_size,
+        embedding_dimension=256,
+        max_sequence_length=context_length,
+        total_blocks=4,
+        num_heads=4,
+    )
+
+    skeleton = training_framework.Arguments(
+        model=training_framework.to_device(model),
+        loss_function=autograd_functions.softmaxed_cross_entropy.apply,
+        optimizer=optimizer.AdamW(model.parameters()),
+        training_set=training_set,
+        validation_set=validation_set,
+        training_loader=training_loader,
+        validation_loader=validation_loader,
+        max_epochs=10_000,
+        save_path=data_dir / 'model/checkpoint.pt',
+        # epochal_update= ,
+        stop_condition=training_framework.early_stop(patience=50),
+        # schedulers= ,
+    )
+
     training_framework.loop(skeleton)

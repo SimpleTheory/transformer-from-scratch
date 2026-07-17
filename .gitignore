@@ -1,3 +1,37 @@
+# Project Ignores
 data/
-venv/
 .idea/
+
+# Default Python Ignores
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
+# Test/cache artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local model/data artifacts
+data/model/
+*.pt
+*.pth
+*.ckpt

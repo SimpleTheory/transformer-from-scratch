@@ -21,7 +21,8 @@ class AdamW(torch.optim.Optimizer):
         """
         # These are the defaults passed in this dict in case multiple parameter sets come in with only some arguments filled in
         defaults = {
-            "learning_rate": learning_rate,
+            # lr is used instead of `learning_rate` because it is a pytorch convention, so that this works with other pytorch objects
+            "lr": learning_rate,
             "momentum_decay": momentum_decay,
             "variance_decay": variance_decay,
             "prevent_division_by_0": prevent_division_by_0,
@@ -48,10 +49,14 @@ class AdamW(torch.optim.Optimizer):
         return current_batch_gradient, gradient_momentum, gradient_squared_average, step_number
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure = None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
         for parameter_group in self.param_groups:
             # Get current parameter group's arguments
-            learning_rate = parameter_group["learning_rate"]
+            learning_rate = parameter_group["lr"]
             momentum_decay = parameter_group["momentum_decay"]
             variance_decay = parameter_group["variance_decay"]
             prevent_division_by_0 = parameter_group["prevent_division_by_0"]
@@ -108,4 +113,5 @@ class AdamW(torch.optim.Optimizer):
                 # parameter = parameter - learning_rate * (grad_mom_corrected/grad_magnitude_corrected)
                 # Because these are referenced in memory and you want to modify the original copies, in place operations are best.
                 parameter -= learning_rate * (gradient_momentum_bias_corrected/true_magnitude_denominator)
+        return loss
 

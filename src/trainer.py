@@ -4,6 +4,7 @@ import training_framework
 import nn_modules
 import autograd_functions
 import optimizer
+import torch
 from pathlib import Path
 
 def project_root() -> Path:
@@ -16,6 +17,7 @@ def project_root() -> Path:
 # return final_logits, loss
 
 context_length = 2**8
+max_epochs = 10_000
 data_dir = project_root() / 'data'
 
 if __name__ == '__main__':
@@ -50,20 +52,22 @@ if __name__ == '__main__':
         total_blocks=4,
         num_heads=4,
     )
+    model = training_framework.to_device(model)
+    optim = optimizer.AdamW(model.parameters())
 
     skeleton = training_framework.Arguments(
-        model=training_framework.to_device(model),
+        model=model,
         loss_function=autograd_functions.softmaxed_cross_entropy.apply,
-        optimizer=optimizer.AdamW(model.parameters()),
+        optimizer=optim,
         training_set=training_set,
         validation_set=validation_set,
         training_loader=training_loader,
         validation_loader=validation_loader,
-        max_epochs=10_000,
+        max_epochs=max_epochs,
         save_path=data_dir / 'model/checkpoint.pt',
         # epochal_update= ,
         stop_condition=training_framework.early_stop(patience=50),
-        # schedulers= ,
+        schedulers=[torch.optim.lr_scheduler.CosineAnnealingLR(optim, max_epochs, eta_min=1e-3, last_epoch=-1)],
     )
 
     training_framework.loop(skeleton)

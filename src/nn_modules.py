@@ -75,7 +75,11 @@ class DoubleLinearApplied(torch.nn.Module):
             initialization_scaling: float = None
     ):
         """
-        A macro for a double linear layer with an activation function
+        A macro for a double linear layer with an activation function. The idea is to blow up the hidden space to let the
+        model make better decisions about the results of attention then shrink it back down to the original size. In
+        practice, it would look something like:
+
+        (Batch, Sequence Len, Embedding) -> (Batch, Sequence Len, Embedding * 4) -> (Batch, Sequence Len, Embedding)
         """
         super().__init__()
 

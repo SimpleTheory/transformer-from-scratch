@@ -10,7 +10,7 @@ import time
 
 
 # <editor-fold desc="Utility Functions">
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def no_grad(func):
     @functools.wraps(func)
@@ -158,7 +158,10 @@ def epoch_logger(args: "Arguments", epoch: int) -> list[str]:
     delta_val_loss = None if previous_val_loss is None else current_val_loss - previous_val_loss
     is_new_best = current_val_loss < args.best_validation_loss
     effective_best = min(current_val_loss, args.best_validation_loss)
-    learning_rates = [group["lr"] for group in args.optimizer.param_groups]
+    learning_rates = [
+        lr := group.get("lr", group.get("learning_rate", None))for group in args.optimizer.param_groups
+        if lr is not None
+]
 
     parts = [
         f"Epoch: {epoch + 1}/{args.max_epochs}",
@@ -176,7 +179,9 @@ def epoch_logger(args: "Arguments", epoch: int) -> list[str]:
     elif args.kwargs.get('_epochs_without_improvement') is not None:
         parts.append(f'epochs without improvement: {args.kwargs.get('_epochs_without_improvement')}')
 
-    if len(learning_rates) == 1:
+    if not learning_rates:
+        parts.append("lr: unavailable")
+    elif len(learning_rates) == 1:
         parts.append(f"lr: {learning_rates[0]:.3e}")
     else:
         formatted_lrs = ", ".join(f"{lr:.3e}" for lr in learning_rates)
@@ -270,7 +275,8 @@ class Arguments:
     def __post_init__(self):
 
         self.device = torch.device(self.device)
-
+        if self.device.type == "cuda" and self.device.index is None:
+            self.device = torch.device("cuda", torch.cuda.current_device())
         model_devices = {parameter.device for parameter in self.model.parameters()}
         model_devices.update(buffer.device for buffer in self.model.buffers())
         if model_devices and model_devices != {self.device}:
@@ -279,11 +285,9 @@ class Arguments:
                 f"but training device is {self.device}. "
                 "Move the model before constructing the optimizer."
             )
-
         if self.from_existing_model:
             load_training_checkpoint(self)
         validate_optimizer_device(self.model, self.optimizer)
-
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
 
     def start_training(self):

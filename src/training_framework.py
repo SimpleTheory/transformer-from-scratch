@@ -234,7 +234,7 @@ class Arguments:
     #   any other argument parameters that you want to update you may do so if you would like
     #   or if you would like a read-out per epoch you can put that here
     epochal_update: Callable[['Arguments', int], None] = default_epochal_update
-    train_a_batch_update: Callable[['Arguments', int, 'BatchInformation'], None] = lambda args, epoch, batch_information: None
+    batchal_update: Callable[['Arguments', int, 'BatchInformation'], None] = lambda args, epoch, batch_information: None
     stop_condition: Callable[['Arguments', int], bool] = lambda args, epoch: False
     schedulers: list[torch.optim.lr_scheduler.LRScheduler] = field(default_factory=lambda: [])
 
@@ -287,7 +287,7 @@ class Arguments:
     def epochal_num_of_items_evaluated_validation(self):
         return self._epochal_num_of_items_evaluated_validation
 
-    def update_epochal_training_loss(self, batch_info: BatchInformation):
+    def update_epochal_training_loss(self, batch_info: 'BatchInformation'):
         self._epochal_training_loss += batch_info.loss.detach().item() * batch_info.batch_size
         self._epochal_num_of_items_evaluated_training += batch_info.batch_size
 
@@ -360,7 +360,7 @@ def train(args: Arguments, epoch):
         batch_info = BatchInformation(problems, labels, outputs, loss)
         # Maybe make the above a closure?
         args.update_epochal_training_loss(batch_info)
-        args.train_a_batch_update(args, epoch, batch_info)
+        args.batchal_update(args, epoch, batch_info)
 
 def validate(args: Arguments, epoch):
     args.start_evaluating()

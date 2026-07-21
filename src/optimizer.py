@@ -33,6 +33,9 @@ class AdamW(torch.optim.Optimizer):
     @torch.no_grad()
     def get_current_param_state(self, parameter, update=True):
         current_batch_gradient = parameter.grad
+        if current_batch_gradient.is_sparse:
+            # Might implement this in the future
+            raise RuntimeError("This AdamW implementation does not support sparse gradients.")
         parameter_state = self.state[parameter]
 
         if len(parameter_state) == 0:

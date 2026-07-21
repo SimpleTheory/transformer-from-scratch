@@ -82,7 +82,7 @@ if __name__ == '__main__':
         num_heads=4,
     )
     model = training_framework.to_device(model)
-    optim = optimizer.AdamW(make_adamw_parameter_groups(model), learning_rate=starting_learning_rate)
+    optim = optimizer.AdamW(make_adamw_parameter_groups(model, weight_decay=1e-3), learning_rate=starting_learning_rate)
 
     skeleton = training_framework.Arguments(
         model=model,

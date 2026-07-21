@@ -112,9 +112,8 @@ def early_stop(
                 f"{args.epochal_validation_mean_loss}"
             )
         if args.epochal_validation_mean_loss < args.best_validation_loss - minimum_loss_improvement:
-            # Best Loss
-            args.kwargs[early_stop_key] = 0
             # Num Epochs Without Improvement
+            args.kwargs[early_stop_key] = 0
         else:
             args.kwargs[early_stop_key] = args.kwargs.get(early_stop_key, 0) + 1
 

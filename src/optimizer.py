@@ -49,7 +49,7 @@ class AdamW(torch.optim.Optimizer):
         return current_batch_gradient, gradient_momentum, gradient_squared_average, step_number
 
     @torch.no_grad()
-    def step(self, closure = None):
+    def step(self, closure=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():

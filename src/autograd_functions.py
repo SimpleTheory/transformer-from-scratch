@@ -207,6 +207,8 @@ class layer_normalization(torch.autograd.Function):
         :param tiny_num_to_avoid_dev_by_0: Constant
         :return: (batch_size, features, feature_count)
         """
+        # This is done across the columns so the mean is the mean of all the elements in one row
+        # Thus each row has its own mean and z scores, the weight and the bias are broadcasted in to the rows, one for each row.
         elements_minus_mean = input_tensor - input_tensor.mean(dim=-1, keepdim=True)
         # Unbiased for variance changes equation to have a + 1 because of sample size vs true population.
         std_dev = torch.sqrt(input_tensor.var(dim=-1, keepdim=True, unbiased=False) + tiny_num_to_avoid_dev_by_0)

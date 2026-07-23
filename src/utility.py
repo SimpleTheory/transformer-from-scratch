@@ -129,18 +129,20 @@ def parse_keyword_arguments(args: Sequence[str] | None = None,) -> dict[str, str
 
 def parse_config_file(config_file: Path | str) -> dict[str, str]:
     config_file = Path(config_file)
+    if not config_file.exists():
+        raise FileNotFoundError(f'Looked for config file but no such file exists: {config_file}')
     result = {}
-    with open(config_file, 'r') as f:
-        for line in f.readlines():
+    with open(config_file, 'r', encoding='utf-8') as f:
+        for line in f:
             line = line.strip()
-            if line.startswith('#'):
+            if not line or line.startswith('#'):
                 continue
             name, separator, value = get_valid_argument(line)
             var_name = name.replace("-", "_")
             if var_name in result:
                 raise ValueError(f"Argument --{name} was provided twice")
             result[var_name] = value
-        return result
+    return result
 
 class OnlyKwargsAndDataclass(abc.ABCMeta):
     def __new__(mcls, name, bases, namespace, **kwargs):
@@ -228,8 +230,19 @@ class CommandLineArguments(abc.ABC, metaclass=OnlyKwargsAndDataclass):
         return dataclass_from_mapping(cls, mapping, *args, **kwargs)
 
     @classmethod
-    def from_command_line(cls, *args, command_line_arguments=None, **kwargs):
+    def from_command_line_arguments(cls, *args, command_line_arguments=None, **kwargs):
         mapping = parse_keyword_arguments(command_line_arguments)
+        return cls.from_mapping(mapping, *args, **kwargs)
+
+    @classmethod
+    def from_command_line(cls, *args, command_line_arguments=None, **kwargs):
+        """
+        Use argument `--config-file=PATH` to load the arguments from a config file.
+        Otherwise, the arguments will be loaded from the command line as is.
+        """
+        mapping = parse_keyword_arguments(command_line_arguments)
+        if mapping.get('config_file') is not None:
+            return cls.from_config_file(mapping['config_file'])
         return cls.from_mapping(mapping, *args, **kwargs)
 
     @classmethod

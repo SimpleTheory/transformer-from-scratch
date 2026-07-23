@@ -174,10 +174,6 @@ class Arguments:
     kwargs: dict = field(default_factory=dict)
 
     @property
-    def checkpoint_path(self) -> Path:
-        return self.save_path.parent / f'{self.save_path.stem}_training{self.save_path.suffix}'
-
-    @property
     def last_checkpoint_path(self) -> Path:
         return self.save_path.parent / f"{self.save_path.stem}_last{self.save_path.suffix}"
 

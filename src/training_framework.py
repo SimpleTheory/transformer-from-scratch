@@ -7,10 +7,13 @@ import torch.utils.data
 import torch
 import time
 import utility
-
+import csv
 
 # <editor-fold desc="Slot-in Functions">
 early_stop_key = '_epochs_without_improvement'
+last_validation_loss_key = '_previous_validation_loss'
+
+
 def early_stop(
         patience: int = 5,
         minimum_loss_improvement: float = 0.0,
@@ -40,6 +43,7 @@ def early_stop(
 
     return stop_condition
 
+
 def update_schedulers(args: "Arguments", epoch: int):
     for scheduler in args.schedulers:
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -47,9 +51,32 @@ def update_schedulers(args: "Arguments", epoch: int):
         else:
             scheduler.step()
 
+
 def update_batch_scheduler(args: "Arguments"):
     for scheduler in args.batch_schedulers:
         scheduler.step()
+
+
+def save_log(epoch_logger_dict: dict[str, Any], log_file: Path):
+    io_of_logfile: list[list[Any]] = []
+    temporary_path = log_file.with_suffix('.temporarycsv')
+    if log_file.exists():
+        with open(log_file, 'r', newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                io_of_logfile.append(row)
+    else:
+        log_file.parent.mkdir(exist_ok=True)
+        io_of_logfile.append(list(epoch_logger_dict.keys()))
+    io_of_logfile.append([str(value) for value in epoch_logger_dict.values()])
+    io_of_logfile = [list_ for list_ in io_of_logfile if len(list_) > 0]
+    # print(io_of_logfile)
+    with open(temporary_path, 'w', newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(io_of_logfile)
+
+    temporary_path.replace(log_file)
+
 
 def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
     """
@@ -70,24 +97,18 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
     """
     current_val_loss = args.epochal_validation_mean_loss
     current_training_loss = args.epochal_training_mean_loss
-    loss_gap = current_val_loss - current_training_loss
     # previous_training_loss = args.kwargs.get("_previous_training_loss")
-    previous_val_loss = args.kwargs.get("_previous_validation_loss")
     previous_time = args.kwargs.get("_epoch_log_time")
-    completed_epochs_this_run = args.kwargs.get("_completed_epochs_this_run", 0) + 1
-    args.kwargs["_completed_epochs_this_run"] = completed_epochs_this_run
-    now = time.perf_counter()
-    # if args.kwargs.get('_initial_start_time') is None: args.kwargs['_initial_start_time'] = now
-    duration = None if previous_time is None else now - previous_time
+    args.kwargs["_completed_epochs_this_run"] = args.kwargs.get("_completed_epochs_this_run", 0) + 1
     # delta_training_loss = None if previous_training_loss is None else current_training_loss - previous_training_loss
-    delta_val_loss = None if previous_val_loss is None else current_val_loss - previous_val_loss
-    is_new_best = current_val_loss < args.best_validation_loss
-    effective_best_training = min(current_training_loss, args.best_training_loss)
-    effective_best = min(current_val_loss, args.best_validation_loss)
+    delta_val_loss = current_val_loss - args.kwargs.get(last_validation_loss_key) if args.kwargs.get(
+        last_validation_loss_key) is not None else None
     learning_rates = [
         lr for group in args.optimizer.param_groups
         if (lr := group.get("lr", group.get("learning_rate"))) is not None
     ]
+    now = time.perf_counter()
+    elapsed_time = now - args.kwargs['_initial_start_time']
 
     logging_dict: dict[str, Any] = {
         "Epoch": epoch + 1,
@@ -95,28 +116,15 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
         "Items in Epoch Validation": args.epochal_num_of_items_evaluated_validation,
         "Training Loss": args.epochal_training_mean_loss,
         "Validation Loss": current_val_loss,
-        "Current Loss Gap": loss_gap,
-        "Best Training Loss": effective_best_training,
-        "Best Validation Loss": effective_best,
-    }
-    # if delta_training_loss is not None:
-    #     parts.append(f"change: {delta_training_loss:+.6f}")
-    if delta_val_loss is not None:
-        logging_dict['Change in Validation Loss'] = delta_val_loss
-    # if is_new_best:
-    #     logging_dict['New Best Validation Loss'] = is_new_best
-    # elif args.kwargs.get(early_stop_key) is not None:
-    logging_dict['Epochs Without Improvement'] = args.kwargs.get(early_stop_key, 0)
-
-    logging_dict['Learning Rates'] = learning_rates
-
-    if duration is not None:
-        logging_dict['Epoch Time'] = utility.format_seconds_into_time(duration)
-
-    if args.kwargs['_initial_start_time'] != now:
-        elapsed_time = now - args.kwargs['_initial_start_time']
-        logging_dict['Epoch Time Average'] = utility.format_seconds_into_time(elapsed_time / completed_epochs_this_run)
-        logging_dict['Total Run Time'] = utility.format_seconds_into_time(elapsed_time)
+        "Current Loss Gap": current_val_loss - current_training_loss,
+        "Best Training Loss": min(current_training_loss, args.best_training_loss),
+        "Best Validation Loss": min(current_val_loss, args.best_validation_loss),
+        'Change in Validation Loss': delta_val_loss,
+        'Epochs Without Improvement': args.kwargs.get(early_stop_key, 0),
+        'Learning Rates': learning_rates,
+        'Epoch Time': utility.format_seconds_into_time(now - previous_time) if previous_time is not None else None,
+        'Epoch Time Average': utility.format_seconds_into_time(elapsed_time / args.kwargs["_completed_epochs_this_run"]),
+        'Total Run Time': utility.format_seconds_into_time(elapsed_time)}
 
     args.kwargs["_previous_training_loss"] = current_training_loss
     args.kwargs["_previous_validation_loss"] = current_val_loss
@@ -124,14 +132,24 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
 
     return logging_dict
 
+
+def logging_main(args: "Arguments", epoch: int):
+    epoch_logger_dict = get_epoch_logger_dict(args, epoch)
+    print('\n-----------------------------------------------------------------------------------\n')
+    print("\n".join([f'{k}: {v}' for k, v in epoch_logger_dict.items()]))
+    if args.log_path is not None:
+        save_log(epoch_logger_dict, args.log_path)
+
+
 def default_epochal_update(args: "Arguments", epoch: int):
     update_schedulers(args, epoch)
-    print('\n-----------------------------------------------------------------------------------\n')
-    print("\n".join([f'{k}: {v}' for k, v in get_epoch_logger_dict(args, epoch).items()]))
+    logging_main(args, epoch)
+
 
 def default_batch_update(args: "Arguments", epoch: int, batch_info: "BatchInformation"):
     update_batch_scheduler(args)
     args.update_epochal_training_loss(batch_info)
+
 
 # </editor-fold>
 
@@ -149,6 +167,7 @@ class Arguments:
     max_epochs: int
     save_path: Path
     load_path: Path = None
+    log_path: Path | None = None
     # Function that uses this arguments class and the current epoch to do whatever you want:
     #   if you have schedulers you must step them in the epochal update
     #   any other argument parameters that you want to update you may do so if you would like
@@ -191,8 +210,8 @@ class Arguments:
     def epochal_training_mean_loss(self) -> float:
         if self._epochal_num_of_items_evaluated_training > 0:
             return (
-                self._epochal_training_loss
-                / self._epochal_num_of_items_evaluated_training
+                    self._epochal_training_loss
+                    / self._epochal_num_of_items_evaluated_training
             )
         return float("nan")
 
@@ -287,11 +306,14 @@ def validate(args: Arguments, epoch):
             loss = args.loss_function(outputs, labels)
             args.update_epochal_validation_loss(loss, utility.infer_batch_size(problems))
 
+
 def save_model_for_inference(model: torch.nn.Module, path):
     torch.save(model.state_dict(), path)
 
 
-arguments_to_save_for_training = [early_stop_key,]
+arguments_to_save_for_training = [early_stop_key, last_validation_loss_key]
+
+
 def save_model_for_training(args: Arguments, epoch, path):
     kwargs_to_save = {key: args.kwargs[key] for key in arguments_to_save_for_training}
     temporary_path = path.with_suffix(path.suffix + ".temporary")
@@ -310,6 +332,7 @@ def save_model_for_training(args: Arguments, epoch, path):
     )
     temporary_path.replace(path)
 
+
 def save_logic(args: Arguments, epoch):
     if (args.epochal_validation_mean_loss < args.best_validation_loss) or (args.best_validation_loss == float('inf')):
         args.best_validation_loss = args.epochal_validation_mean_loss
@@ -317,6 +340,7 @@ def save_logic(args: Arguments, epoch):
         save_model_for_training(args, epoch, args.best_checkpoint_path)
         save_model_for_inference(args.model, args.save_path)
     save_model_for_training(args, epoch, args.last_checkpoint_path)
+
 
 def load_training_checkpoint(args: Arguments, path):
     """
@@ -344,9 +368,11 @@ def load_training_checkpoint(args: Arguments, path):
     saved_batch_scheduler_states = checkpoint.get("batch_scheduler_state_dicts", [])
 
     if len(saved_scheduler_states) != len(args.schedulers):
-        raise ValueError(f"The checkpoint contains {len(saved_scheduler_states)} scheduler states, but Arguments contains {len(args.schedulers)} schedulers.")
+        raise ValueError(
+            f"The checkpoint contains {len(saved_scheduler_states)} scheduler states, but Arguments contains {len(args.schedulers)} schedulers.")
     if len(saved_batch_scheduler_states) != len(args.batch_schedulers):
-        raise ValueError(f"The checkpoint contains {len(saved_batch_scheduler_states)} scheduler states, but Arguments contains {len(args.batch_schedulers)} schedulers.")
+        raise ValueError(
+            f"The checkpoint contains {len(saved_batch_scheduler_states)} scheduler states, but Arguments contains {len(args.batch_schedulers)} schedulers.")
 
     for scheduler, scheduler_state in zip(args.schedulers, saved_scheduler_states):
         scheduler.load_state_dict(scheduler_state)
@@ -359,7 +385,10 @@ def load_training_checkpoint(args: Arguments, path):
     args.best_validation_loss = checkpoint.get("best_validation_loss", float("inf"))
     args.kwargs.update(checkpoint.get('kwargs', dict()))
 
-    print(f"Resumed training from epoch {args.start_epoch}. Best validation loss: {args.best_validation_loss:.6f}")
+    print(f"Resumed training from epoch {args.start_epoch} - Best validation loss: {args.best_validation_loss:.6f} - "
+          f"Last validation loss: {args.kwargs[last_validation_loss_key]}")
+
+
 # </editor-fold>
 
 
@@ -374,5 +403,3 @@ def loop(args: Arguments):
         save_logic(args, epoch)
         if should_stop:
             break
-
-

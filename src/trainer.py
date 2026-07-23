@@ -50,7 +50,8 @@ class Config(utility.CommandLineArguments):
     save_path: Path
 
     load_path: Path | None = None
-    seed: int = 42
+    log_path: Path | None = None
+    seed: int | None = 42
     context_length: int = 2 ** 8
     max_epochs: int = 10_000
     starting_learning_rate: float = 3e-3
@@ -58,15 +59,15 @@ class Config(utility.CommandLineArguments):
     dataset_cache_dir: Path | None = None
     training_stride: int = utility.derived(lambda self: self.context_length // 2)
     validation_stride: int = utility.derived(lambda self: self.context_length)
-    max_documents_training: int = 10_000
-    max_documents_validation: int = 1_000
+    max_documents_training: int | None = None
+    max_documents_validation: int | None = None
     batch_size = 2**5
     loader_num_workers: int = 2
     embedding_dim: int = 256
     num_heads: int = utility.derived(lambda self: self.embedding_dim // 2**6)  # --> 8-6 -> 2**2
     num_blocks: int = 4
     # Should Device be here?
-    patience: int = 50
+    patience: int = 10
     weight_decay: float = .001
     max_batches: int | None = None
 
@@ -122,6 +123,7 @@ if __name__ == '__main__':
         max_epochs=config.max_epochs,
         save_path=config.save_path,
         load_path=config.load_path,
+        log_path=config.log_path,
         # epochal_update= ,
         stop_condition=training_framework.early_stop(patience=config.patience),
         schedulers=[torch.optim.lr_scheduler.CosineAnnealingLR(optim, config.max_epochs, eta_min=config.minimum_learning_rate, last_epoch=-1)],

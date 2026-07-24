@@ -52,23 +52,33 @@ class Config(utility.CommandLineArguments):
     load_path: Path | None = None
     log_path: Path | None = None
     seed: int | None = 42
+    # Should device be here?
+
     context_length: int = 2 ** 8
-    max_epochs: int = 10_000
-    starting_learning_rate: float = 3e-3
-    minimum_learning_rate: float = 3e-5
-    dataset_cache_dir: Path | None = None
-    training_stride: int = utility.derived(lambda self: self.context_length // 2)
+    training_stride: int = utility.derived(lambda self: self.context_length)
     validation_stride: int = utility.derived(lambda self: self.context_length)
-    max_documents_training: int | None = None
+
+    max_documents_training: int | None = 250_000
     max_documents_validation: int | None = None
-    batch_size = 2**5
+    dataset_cache_dir: Path | None = None
+
+    batch_size: int = 2**5  # Maybe try 64?
     loader_num_workers: int = 2
+
     embedding_dim: int = 256
     num_heads: int = utility.derived(lambda self: self.embedding_dim // 2**6)  # --> 8-6 -> 2**2
     num_blocks: int = 4
-    # Should Device be here?
-    patience: int = 10
-    weight_decay: float = .001
+    dropout: float = 0.1
+
+    starting_learning_rate: float = 3e-4
+    minimum_learning_rate: float = 3e-5
+    weight_decay: float = 1e-2
+    max_gradient_scale: float | None = 1.0
+
+    max_epochs: int = 30
+    patience: int = 7
+    minimum_loss_improvement: float = 1e-4
+
     max_batches: int | None = None
 
 
@@ -108,6 +118,7 @@ if __name__ == '__main__':
         max_sequence_length=config.context_length,
         total_blocks=config.num_blocks,
         num_heads=config.num_heads,
+        dropout_probability=config.dropout,
     )
     model = utility.to_device(model)
     optim = optimizer.AdamW(make_adamw_parameter_groups(model, weight_decay=config.weight_decay), learning_rate=config.starting_learning_rate)
@@ -121,11 +132,12 @@ if __name__ == '__main__':
         training_loader=training_loader,
         validation_loader=validation_loader,
         max_epochs=config.max_epochs,
+        maximum_gradient_scale=config.max_gradient_scale,
         save_path=config.save_path,
         load_path=config.load_path,
         log_path=config.log_path,
         # epochal_update= ,
-        stop_condition=training_framework.early_stop(patience=config.patience),
+        stop_condition=training_framework.early_stop(patience=config.patience, minimum_loss_improvement=config.minimum_loss_improvement),
         schedulers=[torch.optim.lr_scheduler.CosineAnnealingLR(optim, config.max_epochs, eta_min=config.minimum_learning_rate, last_epoch=-1)],
         max_batches=config.max_batches
     )

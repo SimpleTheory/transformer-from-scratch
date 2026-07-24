@@ -249,6 +249,67 @@ class LayerNorm(torch.nn.Module):
     def forward(self, inputs):
         return autograd_functions.layer_normalization.apply(inputs, self.weights, self.biases)
 
+class InvertedDropout(torch.nn.Module):
+    # TODO TEST IF NEW CHANGES WORK (huperparams, grad clipping, dropout) THEN COMMIT THEN RUN ON KAGGLE
+    """
+    Dropout takes a tensor and zeros-out a given probability of values therein, but only during training.
+
+    Notwithstanding why the issue is that will reduce the total scale of the tensor so say you have [1, 1, 1] -> [1, 1, 0]
+    the latter is smaller on average by 1 - the zero-out probability.
+    There are two ways to fix this:
+    Traditionally at inference/validation when there is no dropout people would apply tenser * (1 - zero-out probability)
+    on whatever tensors the dropout was applied on in training. This however leads to more work at inference time when the
+    model is deployed.
+    Nowadays people scale up the output of the dropout by / (1 - zero-out probability). That way the inference model is
+    faster and the dropout is self-contained in training. Hence the name "Inverted" Dropout which is what this implementation does.
+
+    The theory behind dropout is that networks can overtrain/overfit to specific values in a tensor which can have cascading
+    effects on every layer thereafter. By zeroing out random values you make it so the model is not guaranteed to see any
+    specific value or a collection of any specific values in any meaningful way. As such, you are "forcing" the model to
+    distribute what it uses across a meaningful number of values in the Tensor. Essentially you are forcing it to infer
+    what something is, by forcing it to fill in the blanks when not all the information is provided in training. Kind of
+    like someone listening to a conversation in a very noisy area. They understand what is being said not because they hear
+    all the phonemes, but they hear some of them and fill in the blanks with context. There is no context here necessarily,
+    it just has to fill in the blanks based on what it did "hear" but that still works well to reduce overfitting in training.
+
+    Because of the above dropout is usually applied in big hidden spaces or pivotal points of the model where the model can
+    use specific values to overfit. It is not usually applied when that is not the case. For instance in a transformer it
+    may be applied after, embedding, attention and feed forward, since these layers fit those criteria. But it will probabily
+    not be applied to layer-norms or just any random linear layer.
+    """
+    def __init__(self, probability: float = 0.1):
+        super().__init__()
+        if not 0 <= probability < 1:
+            raise ValueError("Dropout probability must be in [0, 1).")
+        self.probability = probability
+
+    @property
+    def keep_probability(self):
+        return 1 - self.probability
+
+    def forward(self, inputs):
+        # Only apply dropout in training
+        if not self.training or self.probability == 0:
+            return inputs
+        # Create mask of which values to randomly zero-out
+        mask = torch.rand_like(inputs) > self.probability
+        # Dividing by `1 - probability` re-applies the scale that was lost from randomly zeroing out a bunch of the values of the input.
+        # The scale matters because it changes the output when it is larger at inference as well as several functions in the model,
+        # namely activation functions.
+
+        # This implementation scales the outputs from the training to be larger. But it used to be that instead people
+        # scaled the outputs from validation/inference to be smaller by doing `inference_output = input * (1 - probability)`
+        # (at least wherever the dropout was applied).
+        # This is why this implementation is called inverted dropout. Since dropout used to be scaled down at inference,
+        # but now is scaled up at training. Hence, `InvertedDropout` vs how it used to be.
+
+        # However scaling up the training output is slightly more efficient because it means there is less work for the
+        # model when deployed doing inference. We are essentially shifting that work to the training for the production
+        # inference model to be slightly faster and smaller.
+
+        # Apply mask and scale up by what was lost on average through the dropout operation to keep scale.
+        return inputs * mask / (1 - self.probability)
+
 class EmbeddingLayer(torch.nn.Module):
     def __init__(self, vocab_size: int, embedding_dimensions: int, initializer=.02):
         super().__init__()
@@ -459,7 +520,8 @@ class TransformerBlock(torch.nn.Module):
             # skip_attention_layer_norm: bool = True,
             ff_intermediate_columns: int = None,
             ff_total_experts: int = 8,
-            ff_experts_to_accept: int = 2
+            ff_experts_to_accept: int = 2,
+            dropout_probability: float = 0.1
     ):
         # TODO init level doc comment explaining the params
         # INCLUDE IN DOC COMMENT Columns % Num of heads must == 0
@@ -472,6 +534,7 @@ class TransformerBlock(torch.nn.Module):
         self.ff_intermediate_columns = embedding_dimension * 4 if ff_intermediate_columns is None else ff_intermediate_columns
         # </editor-fold>
 
+        self.dropout = InvertedDropout(dropout_probability)
         self.layer_norm_1 = LayerNorm(embedding_dimension)
         self.attention_block = MultiHeadAttention(embedding_dimension, num_of_heads, columns, True)
         self.layer_norm_2 = LayerNorm(embedding_dimension)
@@ -507,12 +570,12 @@ class TransformerBlock(torch.nn.Module):
 
         # Residual connection, apply the multihead attention to the layer normalized input to stabilize it.
         # This is needed in case of noise from the previous operations due to the residual connection concept.
-        input_copy = input_copy + self.attention_block(self.layer_norm_1(input_copy))
+        input_copy = input_copy + self.dropout(self.attention_block(self.layer_norm_1(input_copy)))
 
         # Mix and expand the output from the attention with a linear layer then reproject it down to size `embedding_dim`
         # with a second linear layer. Since the linear layers are connected to each other they are split with an activation
         # function to introduce non-linearity. Otherwise, they'd be equivalent to one giga linear layer.
-        input_copy = input_copy + self.feed_forward(self.layer_norm_2(input_copy))
+        input_copy = input_copy + self.dropout(self.feed_forward(self.layer_norm_2(input_copy)))
 
         return input_copy
 
@@ -525,6 +588,7 @@ class GPTModel(torch.nn.Module):
             total_blocks: int,
             num_heads: int,
             ff_intermediate_columns_multiplier: int = 4,
+            dropout_probability: float = 0.1
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -535,12 +599,14 @@ class GPTModel(torch.nn.Module):
 
         self.token_embeddings = EmbeddingLayer(vocab_size, embedding_dimension)
         self.positional_embeddings = EmbeddingLayer(max_sequence_length, embedding_dimension)
+        self.dropout = InvertedDropout(dropout_probability)
 
         self.transformer_blocks = torch.nn.ModuleList([
             TransformerBlock(
                 embedding_dimension=embedding_dimension,
                 num_of_heads=num_heads,
-                ff_intermediate_columns=embedding_dimension * ff_intermediate_columns_multiplier
+                ff_intermediate_columns=embedding_dimension * ff_intermediate_columns_multiplier,
+                dropout_probability=dropout_probability
                 # skip_attention_layer_norm=False,
             )
             for _ in range(total_blocks)
@@ -589,7 +655,7 @@ class GPTModel(torch.nn.Module):
         token_vectors = self.token_embeddings(inputs)
         position_vectors = self.positional_embeddings(position_ids)
         # (Batch Size, Sequence Length, Embedding Dimensions)
-        data_to_work_on = token_vectors + position_vectors
+        data_to_work_on = self.dropout(token_vectors + position_vectors)
         for block in self.transformer_blocks:
             data_to_work_on = block(data_to_work_on)
 
@@ -603,11 +669,7 @@ class GPTModel(torch.nn.Module):
         return final_logits
 
     @torch.no_grad()
-    def generate(
-            self,
-            token_ids: torch.Tensor,
-            max_new_tokens: int,
-    ):
+    def generate(self, token_ids: torch.Tensor, max_new_tokens: int):
         """
         For a single prompt batch size should be 1.
 

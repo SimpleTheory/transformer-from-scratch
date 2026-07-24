@@ -1,4 +1,5 @@
 import math
+import numpy as np
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -12,6 +13,8 @@ import csv
 # <editor-fold desc="Slot-in Functions">
 early_stop_key = '_epochs_without_improvement'
 last_validation_loss_key = '_previous_validation_loss'
+
+grad_scale_list_key = '_gradient_scale_list'
 
 
 def early_stop(
@@ -78,6 +81,14 @@ def save_log(epoch_logger_dict: dict[str, Any], log_file: Path):
     temporary_path.replace(log_file)
 
 
+def update_grad_scale_list(args: "Arguments", current_grad_scale):
+    if current_grad_scale is not None:
+        if args.kwargs.get(grad_scale_list_key) is None:
+            args.kwargs[grad_scale_list_key] = [current_grad_scale]
+        else:
+            args.kwargs[grad_scale_list_key].append(current_grad_scale)
+
+
 def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
     """
     Epoch: The count of the current epoch,
@@ -107,6 +118,7 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
         lr for group in args.optimizer.param_groups
         if (lr := group.get("lr", group.get("learning_rate"))) is not None
     ]
+    gradient_scale_list = args.kwargs.get(grad_scale_list_key)
     now = time.perf_counter()
     elapsed_time = now - args.kwargs['_initial_start_time']
 
@@ -124,7 +136,16 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
         'Learning Rates': learning_rates,
         'Epoch Time': utility.format_seconds_into_time(now - previous_time) if previous_time is not None else None,
         'Epoch Time Average': utility.format_seconds_into_time(elapsed_time / args.kwargs["_completed_epochs_this_run"]),
-        'Total Run Time': utility.format_seconds_into_time(elapsed_time)}
+        'Total Run Time': utility.format_seconds_into_time(elapsed_time),
+    }
+
+    if args.maximum_gradient_scale is not None and gradient_scale_list:
+        percent_clipped = sum(1 for grad in gradient_scale_list if grad > args.maximum_gradient_scale) / len(gradient_scale_list)
+        logging_dict.update(
+        {'Gradient Scale Mean': np.mean(gradient_scale_list).item(),
+         'Gradient Scale Max Calculated': np.max(gradient_scale_list).item(),
+         'Gradient Percent Clipped': round(percent_clipped, 4)}
+        )
 
     args.kwargs["_previous_training_loss"] = current_training_loss
     args.kwargs["_previous_validation_loss"] = current_val_loss
@@ -148,6 +169,7 @@ def default_epochal_update(args: "Arguments", epoch: int):
 
 def default_batch_update(args: "Arguments", epoch: int, batch_info: "BatchInformation"):
     update_batch_scheduler(args)
+    update_grad_scale_list(args, batch_info.gradient_scale)
     args.update_epochal_training_loss(batch_info)
 
 
@@ -177,6 +199,7 @@ class Arguments:
     stop_condition: Callable[['Arguments', int], bool] = lambda args, epoch: False
     schedulers: list[torch.optim.lr_scheduler.LRScheduler] = field(default_factory=lambda: [])
     batch_schedulers: list[torch.optim.lr_scheduler.LRScheduler] = field(default_factory=lambda: [])
+    maximum_gradient_scale: float | None = 1.0
 
     device: torch.device = utility.device
     best_training_loss: float = float("inf")
@@ -254,6 +277,7 @@ class Arguments:
         self.model.train()
         self._epochal_training_loss = .0
         self._epochal_num_of_items_evaluated_training = 0
+        self.kwargs[grad_scale_list_key] = None
 
     # noinspection PyAttributeOutsideInit
     def start_evaluating(self):
@@ -272,14 +296,24 @@ class Arguments:
             return islice(iterator, self.max_batches)
         return iterator
 
+    def scale_gradients_down(self):
+        """
+        This operation is in place it scales down each of the gradients by max scale / original scale. Only if the the
+        original scale is larger though. cf `utility.scale_down_large_gradients`
+        :return: (None | torch.float32) Original gradient scale
+        """
+        if self.maximum_gradient_scale:
+            return utility.scale_down_large_gradients(self.model, self.maximum_gradient_scale)
+        return None
 
 class BatchInformation:
-    def __init__(self, problems, labels, outputs, loss):
+    def __init__(self, problems, labels, outputs, loss, gradient_norm=None):
         self.problems = problems
         self.labels = labels
         self.outputs = outputs
         self.loss = loss
         self.batch_size = utility.infer_batch_size(problems)
+        self.gradient_scale = gradient_norm
 
 
 # <editor-fold desc="Loop Sub-functions">
@@ -293,9 +327,12 @@ def train(args: Arguments, epoch):
 
         if not torch.isfinite(loss):
             raise RuntimeError(f"Nonfinite training loss at epoch {epoch + 1}: {loss.detach().item()}")
+
         loss.backward()
+        gradient_norm = args.scale_gradients_down()
         args.optimizer.step()
-        args.batchal_update(args, epoch, BatchInformation(problems, labels, outputs, loss))
+
+        args.batchal_update(args, epoch, BatchInformation(problems, labels, outputs, loss, gradient_norm))
 
 
 def validate(args: Arguments, epoch):
@@ -393,6 +430,7 @@ def load_training_checkpoint(args: Arguments, path):
 
 
 def loop(args: Arguments):
+    print('Initializing model loop')
     args.initialize_logging_metrics()
     for epoch in range(args.start_epoch, args.max_epochs):
         train(args, epoch)

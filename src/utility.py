@@ -56,6 +56,69 @@ def data_iterator(dataloader: torch.utils.data.dataloader.DataLoader, device=dev
     for batch_sample in dataloader:
         yield to_device(batch_sample, device)
 
+@torch.no_grad()
+def scale_down_large_gradients(model: torch.nn.Module, max_scale: float, tiny_num_to_avoid_div_by_0=1e-6):
+    """
+    The idea is that fundamentally there is a total scale for all the gradients from which you can infer the generic size
+    of each gradient. That scale is sqrt(sum(each gradient ** 2)).
+
+    Having large gradients though makes the model unstable. So we are arbitrarily defining a max "total scale" which the
+    gradients should abide by. If the total scale (mentioned above) is more than our arbitrary `max scale`,
+    then we scale each of the gradients by `our max scale / the current actual scale` to bring it back to our set max.
+
+    :param model: The model whose parameters will be scaled down
+    :param max_scale: Our arbitrarily defined max scale
+    :param tiny_num_to_avoid_div_by_0: self-explanatory
+    :return: (`torch.float32`) The function return the original total scale of the gradients, so that people can use it for
+    logging or other miscellaneous calculations.
+    """
+    current_scale = calculate_gradient_sqrt_square_norm(model)
+    if current_scale is None:
+        raise RuntimeError('There was no gradients to scale down at the time scale_down_large_gradients was called.')
+    if not torch.isfinite(current_scale):
+        raise RuntimeError(f"Gradient norm is nonfinite: {current_scale.item()}")
+    # This if statement might cause bottlenecks because it has to move this info to CPU to calculate it.
+    # You can do scale.clamp(1) instead but then you also get a lot of redundant operations if the condition ends up being False.
+    if current_scale > max_scale:
+        scale = max_scale / (current_scale + tiny_num_to_avoid_div_by_0)
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                parameter.grad *= scale
+    return current_scale
+
+@torch.no_grad()
+def calculate_gradient_sqrt_square_norm(model: torch.nn.Module):
+    """
+    The square root of the sum of all the parameters squared. This is done to calculate the generic scale of the model's
+    gradients. cf func `scale_down_large_gradients`
+
+    :param model: Model whose parameters you are going to calculate L2 norm of
+    :return: (torch.float32) `sqrt(sum(p.grad**2 for p in model.parameters()))`
+    """
+    # We initialize to None for 2 reasons:
+    # 1. By setting the first gradient to the total_squared_norm it can also inherit it properties like device, dtype, etc.
+        # So we can use that instead of trying to set that manually
+    # 2. In the off chance the function returns None, then that means there were no gradients, this is because the result
+        # can end up naturally being 0.
+    total_squared_norm = None
+
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        # Get the regular value of the gradient with grad.detach() then
+        # Convert to Float 32 for squared operation stability
+        current_squared_norm = parameter.grad.detach().float().square().sum()
+
+        if total_squared_norm is None:
+            total_squared_norm = current_squared_norm
+        else:
+            total_squared_norm += current_squared_norm
+
+    if total_squared_norm is None:
+        return None
+    else:
+        return total_squared_norm.sqrt()
+
 def validate_optimizer_device(model, optimizer):
     parameters = list(model.parameters())
     if not parameters:

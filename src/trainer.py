@@ -77,6 +77,7 @@ class Config(utility.CommandLineArguments):
 
     max_epochs: int = 30
     patience: int = 7
+    initial_epoch_buffer: int = 0
     minimum_loss_improvement: float = 1e-4
 
     max_batches: int | None = None
@@ -121,7 +122,18 @@ if __name__ == '__main__':
         dropout_probability=config.dropout,
     )
     model = utility.to_device(model)
-    optim = optimizer.AdamW(make_adamw_parameter_groups(model, weight_decay=config.weight_decay), learning_rate=config.starting_learning_rate)
+    optim = optimizer.AdamW(
+        make_adamw_parameter_groups(
+            model,
+            weight_decay=config.weight_decay
+        ),
+        learning_rate=config.starting_learning_rate
+    )
+    early_stop = training_framework.early_stop(
+        patience=config.patience,
+        minimum_loss_improvement=config.minimum_loss_improvement,
+        initial_epoch_buffer=config.initial_epoch_buffer
+    )
 
     skeleton = training_framework.Arguments(
         model=model,
@@ -137,8 +149,10 @@ if __name__ == '__main__':
         load_path=config.load_path,
         log_path=config.log_path,
         # epochal_update= ,
-        stop_condition=training_framework.early_stop(patience=config.patience, minimum_loss_improvement=config.minimum_loss_improvement),
-        schedulers=[torch.optim.lr_scheduler.CosineAnnealingLR(optim, config.max_epochs, eta_min=config.minimum_learning_rate, last_epoch=-1)],
+        stop_condition=early_stop,
+        schedulers=[
+            torch.optim.lr_scheduler.CosineAnnealingLR(optim, config.max_epochs, eta_min=config.minimum_learning_rate, last_epoch=-1),
+        ],
         max_batches=config.max_batches
     )
 

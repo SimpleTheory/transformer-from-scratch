@@ -19,7 +19,7 @@ grad_scale_stats_key = '_gradient_scale_stats'
 def early_stop(
         patience: int = 5,
         minimum_loss_improvement: float = 0.0,
-        initial_epoch_buffer: int = 100,
+        initial_epoch_buffer: int = 0,
         print_result: bool = True,
 ):
     def stop_condition(args: "Arguments", epoch: int) -> bool:

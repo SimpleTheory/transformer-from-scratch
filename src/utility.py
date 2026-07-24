@@ -57,7 +57,7 @@ def data_iterator(dataloader: torch.utils.data.dataloader.DataLoader, device=dev
         yield to_device(batch_sample, device)
 
 @torch.no_grad()
-def scale_down_large_gradients(model: torch.nn.Module, max_scale: float, tiny_num_to_avoid_div_by_0=1e-6):
+def scale_down_large_gradients(model: torch.nn.Module, max_scale: float, tiny_num_to_avoid_div_by_0=1e-6) -> torch.Tensor:
     """
     The idea is that fundamentally there is a total scale for all the gradients from which you can infer the generic size
     of each gradient. That scale is sqrt(sum(each gradient ** 2)).
@@ -69,7 +69,7 @@ def scale_down_large_gradients(model: torch.nn.Module, max_scale: float, tiny_nu
     :param model: The model whose parameters will be scaled down
     :param max_scale: Our arbitrarily defined max scale
     :param tiny_num_to_avoid_div_by_0: self-explanatory
-    :return: (`torch.float32`) The function return the original total scale of the gradients, so that people can use it for
+    :return: (`Tensor Scalar torch.float32`) The function return the original total scale of the gradients, so that people can use it for
     logging or other miscellaneous calculations.
     """
     current_scale = calculate_gradient_sqrt_square_norm(model)
@@ -87,13 +87,13 @@ def scale_down_large_gradients(model: torch.nn.Module, max_scale: float, tiny_nu
     return current_scale
 
 @torch.no_grad()
-def calculate_gradient_sqrt_square_norm(model: torch.nn.Module):
+def calculate_gradient_sqrt_square_norm(model: torch.nn.Module) -> torch.Tensor | None:
     """
     The square root of the sum of all the parameters squared. This is done to calculate the generic scale of the model's
     gradients. cf func `scale_down_large_gradients`
 
     :param model: Model whose parameters you are going to calculate L2 norm of
-    :return: (torch.float32) `sqrt(sum(p.grad**2 for p in model.parameters()))`
+    :return: `(Tensor Scalar torch.float32)` sqrt(sum(p.grad**2 for p in model.parameters()))
     """
     # We initialize to None for 2 reasons:
     # 1. By setting the first gradient to the total_squared_norm it can also inherit it properties like device, dtype, etc.

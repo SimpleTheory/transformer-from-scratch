@@ -1,5 +1,4 @@
 import math
-import numpy as np
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -14,7 +13,7 @@ import csv
 early_stop_key = '_epochs_without_improvement'
 last_validation_loss_key = '_previous_validation_loss'
 
-grad_scale_list_key = '_gradient_scale_list'
+grad_scale_stats_key = '_gradient_scale_stats'
 
 
 def early_stop(
@@ -81,12 +80,40 @@ def save_log(epoch_logger_dict: dict[str, Any], log_file: Path):
     temporary_path.replace(log_file)
 
 
-def update_grad_scale_list(args: "Arguments", current_grad_scale):
-    if current_grad_scale is not None:
-        if args.kwargs.get(grad_scale_list_key) is None:
-            args.kwargs[grad_scale_list_key] = [current_grad_scale]
-        else:
-            args.kwargs[grad_scale_list_key].append(current_grad_scale)
+def update_grad_scale_list(args: "Arguments", current_grad_scale: torch.Tensor | None):
+    """
+    Increments the gradient stats dict, and creates it if it doesn't exist.
+    :param args: Arguments
+    :param current_grad_scale: Tensor Scalar float32
+    :return: None
+    """
+    if args.maximum_gradient_scale is None or current_grad_scale is None:
+        return
+    # Deprecated comments but keeping because the information is useful
+    # Convert it to a Non-Tensor Object first then add to list
+    # .detach() ensures the logging value is disconnected from autograd,
+    # while .item() converts the scalar CUDA tensor into a normal Python number.
+
+    # One caveat: .item() synchronizes the CPU and GPU each batch. For a small proof-of-concept training run,
+    # that is unlikely to matter much. For maximum performance, accumulate the statistics as tensors and call
+    # .item() only once per epoch, or maintain running sum/max/count values rather than storing every batch value.
+    stats_dtype = torch.float32 if current_grad_scale.dtype in (torch.float16, torch.bfloat16) else current_grad_scale.dtype
+    current_grad_scale = current_grad_scale.detach().to(stats_dtype)
+
+    stats = args.kwargs.get(grad_scale_stats_key)
+
+    if stats is None:
+        args.kwargs[grad_scale_stats_key] = {
+            "sum": current_grad_scale.clone(),
+            "max": current_grad_scale.clone(),
+            "clipped": (current_grad_scale > args.maximum_gradient_scale).to(torch.int64),
+            "count": 1,
+        }
+    else:
+        stats["sum"] += current_grad_scale
+        stats["max"] = torch.maximum(stats["max"], current_grad_scale)
+        stats["clipped"] += current_grad_scale > args.maximum_gradient_scale
+        stats["count"] += 1
 
 
 def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
@@ -118,7 +145,7 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
         lr for group in args.optimizer.param_groups
         if (lr := group.get("lr", group.get("learning_rate"))) is not None
     ]
-    gradient_scale_list = args.kwargs.get(grad_scale_list_key)
+    gradient_stats = args.kwargs.get(grad_scale_stats_key)
     now = time.perf_counter()
     elapsed_time = now - args.kwargs['_initial_start_time']
 
@@ -139,13 +166,12 @@ def get_epoch_logger_dict(args: "Arguments", epoch: int) -> dict[str, Any]:
         'Total Run Time': utility.format_seconds_into_time(elapsed_time),
     }
 
-    if args.maximum_gradient_scale is not None and gradient_scale_list:
-        percent_clipped = sum(1 for grad in gradient_scale_list if grad > args.maximum_gradient_scale) / len(gradient_scale_list)
-        logging_dict.update(
-        {'Gradient Scale Mean': np.mean(gradient_scale_list).item(),
-         'Gradient Scale Max Calculated': np.max(gradient_scale_list).item(),
-         'Gradient Percent Clipped': round(percent_clipped, 4)}
-        )
+    if all([args.maximum_gradient_scale is not None, gradient_stats, gradient_stats["count"]]):
+            logging_dict.update({
+                "Gradient Scale Mean": (gradient_stats["sum"] / gradient_stats["count"]).item(),
+                "Gradient Scale Max Calculated": gradient_stats["max"].item(),
+                "Gradient Percent Clipped": (gradient_stats["clipped"] / gradient_stats["count"]).item(),
+            })
 
     args.kwargs["_previous_training_loss"] = current_training_loss
     args.kwargs["_previous_validation_loss"] = current_val_loss
@@ -277,7 +303,7 @@ class Arguments:
         self.model.train()
         self._epochal_training_loss = .0
         self._epochal_num_of_items_evaluated_training = 0
-        self.kwargs[grad_scale_list_key] = None
+        self.kwargs[grad_scale_stats_key] = None
 
     # noinspection PyAttributeOutsideInit
     def start_evaluating(self):
@@ -296,11 +322,11 @@ class Arguments:
             return islice(iterator, self.max_batches)
         return iterator
 
-    def scale_gradients_down(self):
+    def scale_gradients_down(self) -> torch.Tensor | None:
         """
         This operation is in place it scales down each of the gradients by max scale / original scale. Only if the the
         original scale is larger though. cf `utility.scale_down_large_gradients`
-        :return: (None | torch.float32) Original gradient scale
+        :return: (None | Tensor Scalar torch.float32) Original gradient scale
         """
         if self.maximum_gradient_scale:
             return utility.scale_down_large_gradients(self.model, self.maximum_gradient_scale)

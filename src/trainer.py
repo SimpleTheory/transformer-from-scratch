@@ -80,7 +80,7 @@ class Config(utility.CommandLineArguments):
     weight_decay: float = 1e-2
     max_gradient_scale: float | None = 1.0
 
-    max_epochs: int = 30
+    max_epochs: int = 60
     patience: int = 7
     initial_epoch_buffer: int = 0
     minimum_loss_improvement: float = 1e-4

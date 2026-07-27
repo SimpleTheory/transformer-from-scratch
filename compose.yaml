@@ -1,0 +1,33 @@
+services:
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: transformer-from-scratch:4090
+
+    environment:
+      SAVE_PATH: /data/model/checkpoint.pt
+      LOAD_PATH: /data/model/checkpoint_last.pt
+      LOG_PATH: /data/logs/training.log
+
+      DATASET_CACHE_DIR: /data/huggingface-cache
+      HF_HOME: /data/huggingface-cache
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+
+    shm_size: "4gb"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: "no"

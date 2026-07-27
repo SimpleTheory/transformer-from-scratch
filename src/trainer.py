@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from datasets import load_dataset
 import dataset_code
@@ -11,6 +12,10 @@ import utility
 def project_root() -> Path:
     current_file_path = Path(__file__).resolve()
     return current_file_path.parent.parent
+
+def optional_environment_path(name: str, default=None) -> Path | None:
+    value = os.getenv(name, default=default)
+    return Path(value) if value else None
 
 def make_adamw_parameter_groups(model: torch.nn.Module, weight_decay: float = 1e-2) -> list[dict]:
     """
@@ -47,10 +52,10 @@ data_dir = project_root() / 'data'
 # selection_seed: int = 42
 
 class Config(utility.CommandLineArguments):
-    save_path: Path
+    save_path: Path = optional_environment_path('SAVE_PATH', data_dir / 'model/model_save.pt')
 
-    load_path: Path | None = None
-    log_path: Path | None = None
+    load_path: Path | None = optional_environment_path('LOAD_PATH')
+    log_path: Path | None = optional_environment_path('LOG_PATH')
     seed: int | None = 42
     # Should device be here?
 
@@ -60,7 +65,7 @@ class Config(utility.CommandLineArguments):
 
     max_documents_training: int | None = 250_000
     max_documents_validation: int | None = None
-    dataset_cache_dir: Path | None = None
+    dataset_cache_dir: Path | None = None  # optional_environment_path('DATASET_CACHE_DIR')
 
     batch_size: int = 2**5  # Maybe try 64?
     loader_num_workers: int = 2

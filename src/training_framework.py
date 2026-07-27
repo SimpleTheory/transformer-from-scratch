@@ -68,7 +68,7 @@ def save_log(epoch_logger_dict: dict[str, Any], log_file: Path):
             for row in reader:
                 io_of_logfile.append(row)
     else:
-        log_file.parent.mkdir(exist_ok=True)
+        log_file.parent.mkdir(exist_ok=True, parents=True)
         io_of_logfile.append(list(epoch_logger_dict.keys()))
     io_of_logfile.append([str(value) for value in epoch_logger_dict.values()])
     io_of_logfile = [list_ for list_ in io_of_logfile if len(list_) > 0]

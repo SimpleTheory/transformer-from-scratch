@@ -1,0 +1,10 @@
+.git/
+venv/
+.idea/
+__pycache__/
+*.pyc
+data/
+*.pt
+syllabus.txt
+todo.txt
+start_training.bat

@@ -34,18 +34,32 @@ docker compose up -d --build %SERVICE_NAME%
 
 if errorlevel 1 (
     echo.
-    echo Docker failed to start the training container.
-    echo Please capture the error above and send it to the repository maintainer.
+    echo Docker failed to create or start the container.
+    pause
+    exit /b 1
+)
+
+echo Waiting for the container to initialize...
+timeout /t 5 /nobreak >nul
+
+docker compose ps --status running --services | findstr /x /c:"%SERVICE_NAME%" >nul
+
+if errorlevel 1 (
+    echo.
+    echo The container started but then exited.
+    echo.
+    docker compose ps --all
+    echo.
+    echo Container logs:
+    docker compose logs --tail=200 %SERVICE_NAME%
+    echo.
     pause
     exit /b 1
 )
 
 echo.
-echo Training started successfully.
-echo Closing this window will not stop the container.
+echo Training is running successfully.
 echo Press Ctrl+C to stop following the logs.
 echo.
 
 docker compose logs -f %SERVICE_NAME%
-
-pause

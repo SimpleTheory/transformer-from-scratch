@@ -11,6 +11,7 @@ COPY requirements.txt /app/requirements.txt
 
 RUN python -m pip install \
     --no-cache-dir \
+    --break-system-packages \
     -r /app/requirements.txt
 
 COPY src/ /app/src/

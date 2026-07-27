@@ -18,7 +18,8 @@ COPY src/ /app/src/
 
 COPY docker_train.sh /usr/local/bin/train-transformer
 
-RUN chmod +x /usr/local/bin/train-transformer
+RUN sed -i 's/\r$//' /usr/local/bin/train-transformer \
+    && chmod +x /usr/local/bin/train-transformer
 
 WORKDIR /workspace
 

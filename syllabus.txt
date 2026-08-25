@@ -1,40 +1,49 @@
-(ChatGPT's Syllabus Instructions)
-If I were doing this project myself, I'd implement the Functions in roughly this order:
---LinearFunction (wx_plus_b)
---ReLUFunction
---SoftmaxFunction
---CrossEntropyFunction
---LayerNormFunction
---EmbeddingFunction
---Gelu
---Silu
---Mask
-
-Then build Modules:
-
---Linear
---LayerNorm
---Embedding
---FeedForward
---SingleHeadAttention
---MultiHeadAttention
---MoEFeedForward
---TransformerBlock
---GPT
-
-Then other necessary objects:
---AdamW
-
-Then assemble into a script to train the model
-    Tokenizer
-    Training Loop
-    Generation Loop
-    Checkpoint Manager
-
 Modules to be added in the future:
-    RotaryEmbedding / RoPE
     RMSNormFunction & Layer (replacement of LayerNorm)
-    --Dropout Layer
-    --Gradient Clipping
-    --Model Config Obj?
+    Gated Feed Forward
+    Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-attention-variants):
+    RotaryEmbedding / RoPE (the exact kind of implementations on how many dimensions needs to be seen)
+    KV Caching
+    MoE Feedforward (working and gated with a load balancing loss)
     Weight tying from embeddings to final linear projection to vocab size?
+
+
+
+----------------------------------------
+Things that are done:
+    (ChatGPT's Syllabus Instructions)
+
+    If I were doing this project myself, I'd implement the Functions in roughly this order:
+        --LinearFunction (wx_plus_b)
+        --ReLUFunction
+        --SoftmaxFunction
+        --CrossEntropyFunction
+        --LayerNormFunction
+        --EmbeddingFunction
+        --Gelu
+        --Silu
+        --Mask
+
+
+    Then build Modules:
+        --Linear
+        --LayerNorm
+        --Embedding
+        --FeedForward
+        --SingleHeadAttention
+        --MultiHeadAttention
+        --MoEFeedForward
+        --TransformerBlock
+        --GPT
+
+    Then other necessary objects and functions:
+        --AdamW
+        --Dropout Layer
+        --Gradient Clipping
+        --Model Config Obj
+
+    Then assemble into a script to train the model
+        --Tokenizer
+        --Training Loop
+        --Generation Loop
+        --Checkpoint Manager

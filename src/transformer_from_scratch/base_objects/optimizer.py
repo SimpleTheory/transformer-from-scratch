@@ -118,3 +118,29 @@ class AdamW(torch.optim.Optimizer):
                 parameter -= learning_rate * (gradient_momentum_bias_corrected/true_magnitude_denominator)
         return loss
 
+def make_adamw_parameter_groups(model: torch.nn.Module, weight_decay: float = 1e-2) -> list[dict]:
+    """
+    The idea is biases don't need weight decay because they are relatively fixed and won't accumulate gradients.
+    Layer norm parameters also don't need weight decay because they are supposed to learn magnitude.
+    Both sets of parameters are broadcast so their size is 1 because of that you can use the following filter to check
+    for which parameters require weight decay. `if parameter.ndim >= 2`
+    :param model:
+    :param weight_decay:
+    :return:
+    """
+    decay_parameters = []
+    no_decay_parameters = []
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+
+        if parameter.ndim >= 2:
+            decay_parameters.append(parameter)
+        else:
+            no_decay_parameters.append(parameter)
+
+    return [
+        {"params": decay_parameters, "weight_decay": weight_decay},
+        {"params": no_decay_parameters, "weight_decay": 0.0},
+    ]

@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 import inspect
 from typing import Any, Callable
+import os
 try:
     import annotationlib
 except ImportError:
@@ -233,7 +234,7 @@ class OnlyKwargsAndDataclass(abc.ABCMeta):
 
     @classmethod
     def prepare_annotations(mcls, bases, namespace):
-        from data_type_inference import infer_field_type
+        from transformer_from_scratch.trainer.data_type_inference import infer_field_type
 
         own_annotations, annotate = mcls.get_namespace_annotations(namespace)
         known_annotations = {**mcls.get_inherited_annotations(bases), **own_annotations}
@@ -340,4 +341,11 @@ class derived:
     def __repr__(self) -> str:
         return '<derived>'
 
+def project_root() -> Path:
+    current_file_path = Path(__file__).resolve()
+    return current_file_path.parent.parent.parent.parent
+
+def optional_environment_path(name: str, default=None) -> Path | None:
+    value = os.getenv(name, default=default)
+    return Path(value) if value else None
 

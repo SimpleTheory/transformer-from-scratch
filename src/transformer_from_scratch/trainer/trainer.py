@@ -1,61 +1,27 @@
-import os
 from pathlib import Path
+import transformer_from_scratch.base_objects as base
 from datasets import load_dataset
-import dataset_code
+import transformer_from_scratch.local_dataset_code as local_dataset_code
 import training_framework
-import nn_modules
-import autograd_functions
-import optimizer
+# import dataset_code
+# import nn_modules
+# import autograd_functions
+# import optimizer
 import torch
-import utility
-
-def project_root() -> Path:
-    current_file_path = Path(__file__).resolve()
-    return current_file_path.parent.parent
-
-def optional_environment_path(name: str, default=None) -> Path | None:
-    value = os.getenv(name, default=default)
-    return Path(value) if value else None
-
-def make_adamw_parameter_groups(model: torch.nn.Module, weight_decay: float = 1e-2) -> list[dict]:
-    """
-    The idea is biases don't need weight decay because they are relatively fixed and won't accumulate gradients.
-    Layer norm parameters also don't need weight decay because they are supposed to learn magnitude.
-    Both sets of parameters are broadcast so their size is 1 because of that you can use the following filter to check
-    for which parameters require weight decay. `if parameter.ndim >= 2`
-    :param model:
-    :param weight_decay:
-    :return:
-    """
-    decay_parameters = []
-    no_decay_parameters = []
-
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-
-        if parameter.ndim >= 2:
-            decay_parameters.append(parameter)
-        else:
-            no_decay_parameters.append(parameter)
-
-    return [
-        {"params": decay_parameters, "weight_decay": weight_decay},
-        {"params": no_decay_parameters, "weight_decay": 0.0},
-    ]
+import transformer_from_scratch.trainer.utility as utility
 
 
 # # The loss is a scalar averaged over each token and over all the batches
 # loss = autograd_functions.softmaxed_cross_entropy.apply(final_logits, expected_outputs)
 # return final_logits, loss
-data_dir = project_root() / 'data'
+data_dir = utility.project_root() / 'data'
 # selection_seed: int = 42
 
 class Config(utility.CommandLineArguments):
-    save_path: Path = optional_environment_path('SAVE_PATH', data_dir / 'model/model_save.pt')
+    save_path: Path = utility.optional_environment_path('SAVE_PATH', data_dir / 'model/model_save.pt')
 
-    load_path: Path | None = optional_environment_path('LOAD_PATH')
-    log_path: Path | None = optional_environment_path('LOG_PATH')
+    load_path: Path | None = utility.optional_environment_path('LOAD_PATH')
+    log_path: Path | None = utility.optional_environment_path('LOG_PATH')
     seed: int | None = 42
     # Should device be here?
 
@@ -91,7 +57,7 @@ class Config(utility.CommandLineArguments):
 if __name__ == '__main__':
     config = Config.from_command_line()
     dataset = load_dataset("roneneldan/TinyStories", cache_dir=config.dataset_cache_dir)
-    training_set = dataset_code.TransformerTextDataset(
+    training_set = local_dataset_code.TransformerTextDataset(
         dataset,
         split="train",
         text_column="text",  # Automatically inferred here
@@ -101,7 +67,7 @@ if __name__ == '__main__':
         selection_seed=config.seed,
     )
 
-    validation_set = dataset_code.TransformerTextDataset(
+    validation_set = local_dataset_code.TransformerTextDataset(
         dataset,
         split="validation",
         context_length=config.context_length,
@@ -118,7 +84,7 @@ if __name__ == '__main__':
 
     )  # test_set)
 
-    model = nn_modules.GPTModel(
+    model = base.GPTModel(
         vocab_size=training_set.vocabulary_size,
         embedding_dimension=config.embedding_dim,
         max_sequence_length=config.context_length,
@@ -127,8 +93,8 @@ if __name__ == '__main__':
         dropout_probability=config.dropout,
     )
     model = utility.to_device(model)
-    optim = optimizer.AdamW(
-        make_adamw_parameter_groups(
+    optim = base.AdamW(
+        base.make_adamw_parameter_groups(
             model,
             weight_decay=config.weight_decay
         ),
@@ -142,7 +108,7 @@ if __name__ == '__main__':
 
     skeleton = training_framework.Arguments(
         model=model,
-        loss_function=autograd_functions.softmaxed_cross_entropy.apply,
+        loss_function=base.softmaxed_cross_entropy.apply,
         optimizer=optim,
         training_set=training_set,
         validation_set=validation_set,

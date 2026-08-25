@@ -1,0 +1,32 @@
+[project]
+name = "transformer-from-scratch"
+version = "0.1.0"
+description = "An educational library meant to show case how transformers can be built from scratch using pytorch as a mathmatical and utility library rather than just relying on its presets."
+readme = "README.md"
+keywords = ["educational", "transformer", "AI", "math"]
+authors = [
+    { name = "Ari Frid", email = "arigfrid@hotmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "tiktoken",
+    "datasets",
+]
+# Pin torch to your custom PyTorch CUDA 12.6 index
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126" }]
+
+# Define the custom index URL
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[project.scripts]
+transformer-from-scratch = "transformer_from_scratch:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+

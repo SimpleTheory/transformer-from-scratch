@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 
 class TransformerTextDataset(Dataset):
     """
-    Fixed-length dataset for causal next-token prediction.
+    Fixed-length local_dataset_code for causal next-token prediction.
 
     inputs:  [token_0, token_1, ..., token_n]
     targets: [token_1, token_2, ..., token_n+1]
@@ -71,19 +71,19 @@ class TransformerTextDataset(Dataset):
             document_count += 1
 
         if document_count == 0:
-            raise ValueError("The dataset contains no documents.")
+            raise ValueError("The local_dataset_code contains no documents.")
 
         self.tokens = torch.tensor(token_ids, dtype=torch.long)
 
         if len(self.tokens) <= context_length:
             raise ValueError(
-                f"The dataset contains {len(self.tokens)} tokens but needs "
+                f"The local_dataset_code contains {len(self.tokens)} tokens but needs "
                 f"more than context_length={context_length}."
             )
 
     @staticmethod
     def _infer_text_column(dataset: HuggingFaceDataset) -> str:
-        """Infer the dataset's text column."""
+        """Infer the local_dataset_code's text column."""
 
         if "text" in dataset.column_names:
             return "text"

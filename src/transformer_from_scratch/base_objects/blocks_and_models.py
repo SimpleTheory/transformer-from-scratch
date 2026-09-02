@@ -1,4 +1,3 @@
-from transformer_from_scratch.base_objects.nn_modules import *
 from transformer_from_scratch.base_objects.nn_module_modernizations import *
 from transformer_from_scratch.base_objects.autograd_functions import *
 

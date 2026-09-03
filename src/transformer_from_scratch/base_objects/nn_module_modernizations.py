@@ -175,7 +175,6 @@ class MoEDoubleLinearApplied(torch.nn.Module):
                  out_columns: int = None,
                  initialization_scaling: float = None
                  ):
-        raise NotImplementedError()
         super().__init__()
         # Keep dimensionality by default for residuals
         if out_columns is None:

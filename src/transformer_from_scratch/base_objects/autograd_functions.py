@@ -633,5 +633,3 @@ class silu(torch.autograd.Function):
         input_tensor, sigmoided_tensor = ctx.saved_tensors
         silu_derivative = sigmoided_tensor + input_tensor * sigmoided_tensor * (1 - sigmoided_tensor)
         return output_gradients * silu_derivative
-
-

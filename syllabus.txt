@@ -1,5 +1,6 @@
 Modules to be added in the future:
     MoE Feedforward (working and gated with a load balancing loss)
+    Modularize weight init scaling into functions
 
 Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-attention-variants):
     • Read the article

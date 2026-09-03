@@ -3,31 +3,11 @@ import transformer_from_scratch.base_objects.autograd_functions as autograd_func
 import math
 
 """
-... Then build Modules:
-
---Linear
---LayerNorm
---FeedForward
---MoEFeedForward
---Embedding
---SingleHead Attention
---MultiHeadAttention
-TransformerBlock
-GPT
-
-
-# Sample Linear layer to see how to apply nn.Module
-class MyLinearLayer(torch.nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features))
-        self.biases = torch.nn.Parameter(torch.zeros(out_features))
-
-    def forward(self, inputs):
-        return wx_plus_b.apply(inputs, self.weights, self.biases)
-
 Notes:
-    Don't use @dataclass for nn.Modules (while learning pytorch) because order matters when super init is called and the attributes are defined
+    - Don't use @dataclass for nn.Modules (while learning pytorch) because order matters when super init is called
+    and the attributes are defined
+    
+    - Weight Initialization Scaling:
             Generic/Unactivated Layer
                 1/sqrt(in_features)
                 • A generic linear layer at init should scaled by the 1/sqrt(in_features),
@@ -37,8 +17,8 @@ Notes:
             Kaiming/He style, often for ReLU networks
                 W = torch.randn(in_features, out_features) * math.sqrt(2 / in_features)
             etc...
-    The reason being that the activation function gates a lot of the output so the initial scale should be different
-    Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status
+        The reason you have to do this is that the activation function gates a lot of the output so the initial scale should be different
+        Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status!
 
 """
 class LinearLayer(torch.nn.Module):

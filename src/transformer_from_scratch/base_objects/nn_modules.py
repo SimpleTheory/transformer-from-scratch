@@ -28,7 +28,10 @@ class MyLinearLayer(torch.nn.Module):
 
 Notes:
     Don't use @dataclass for nn.Modules (while learning pytorch) because order matters when super init is called and the attributes are defined
-    A generic linear layer at init should scaled by the 1/sqrt(in_features), though this could change from the activation function for example:
+            Generic/Unactivated Layer
+                1/sqrt(in_features)
+                • A generic linear layer at init should scaled by the 1/sqrt(in_features),
+                 though this could change from the activation function for example:
             Xavier/Glorot style, often for tanh/sigmoid-ish balanced layers
                 W = torch.randn(in_features, out_features) * math.sqrt(2 / (in_features + out_features))
             Kaiming/He style, often for ReLU networks
@@ -39,33 +42,46 @@ Notes:
 
 """
 class LinearLayer(torch.nn.Module):
-    def __init__(self, in_features: int, out_features: int, initialization_scaling: float = None, bias: bool = True):
-        """
-        Layer initialization defaults to `1/sqrt(in_features)`
+    """
         Layer wx+b where
-            x (..., in_features)
-            w (out_features, in_features)
-            b (out_features,)
+        x (..., in_features)
+        w (out_features, in_features)
+        b (out_features,)
 
         Where
             `in features` should be the trailing dimension of the input of this layer
 
             `out features` should be the amount of columns you want to add or remove from the matrix in the pipeline (after the transformation)
 
-        The bias `b` can be disabled to just have a `wx` with param: `bias = False`
+        The bias `b` can be disabled to just have a `wx` by setting it to None
+    """
+    def __init__(self, weights: torch.Tensor, biases: torch.Tensor | None):
+        """
+        :param weights: Must be (out_features, in_features)
+        :param biases: (out_features,) or None
         """
         super().__init__()
+        self.weights = weights
+        self.biases = biases
+
+    @classmethod
+    def from_feature_counts(cls, in_features: int, out_features: int, initialization_scaling: float = None, bias: bool = True):
+        # Layer initialization defaults to `1/sqrt(in_features)`
         # Layer initialization because randn's std is too big leading to big gradients and inefficient learning
         # Generic layer init is torch.randn(...) / sqrt(in_features)
         if initialization_scaling is None:
             initialization_scaling = 1 / math.sqrt(in_features)
-        self.initialization_scaling = initialization_scaling
-        self.bias = bias
-        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features) * initialization_scaling)
-        self.biases = torch.nn.Parameter(torch.zeros(out_features)) if bias else None
+        return cls(
+            weights=torch.nn.Parameter(torch.randn(out_features, in_features) * initialization_scaling),
+            biases=torch.nn.Parameter(torch.zeros(out_features)) if bias else None,
+        )
 
     def forward(self, inputs: torch.Tensor):
-        return autograd_functions.wx_plus_b_with_kwarg(inputs, self.weights, self.biases, bias=self.bias)
+        return autograd_functions.wx_plus_b_with_kwarg(inputs, self.weights, self.biases)
+
+    @property
+    def bias(self) -> bool:
+        return self.biases is not None
 
 class DoubleLinearApplied(torch.nn.Module):
     def __init__(
@@ -115,7 +131,6 @@ class LayerNorm(torch.nn.Module):
         return autograd_functions.layer_normalization.apply(inputs, self.weights, self.biases)
 
 class InvertedDropout(torch.nn.Module):
-    # TODO TEST IF NEW CHANGES WORK (huperparams, grad clipping, dropout) THEN COMMIT THEN RUN ON KAGGLE
     """
     Dropout takes a tensor and zeros-out a given probability of values therein, but only during training.
 

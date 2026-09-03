@@ -1,0 +1,37 @@
+Implementation Taxonomy:
+    Q/K/V organization:     MHA /
+                            GQA /
+                            MQA /
+                            MLA
+
+    Attention span:         Full /
+                            Sliding /
+                            Learned Sparse
+
+    Position handling:      RoPE /
+                            Partial RoPE /
+                            MLA-specific
+
+    Sequence mechanism:     Softmax Attention /
+                            DeltaNet /
+                            Lightning
+
+Implementation Order Thereof:
+    -- Existing MHA
+        ↓
+    GQA / MQA
+        ↓
+    Sliding Window
+        ↓
+    Gated Attention
+        ↓
+    MLA
+        ↓
+    DeepSeek Sparse Attention
+        ↓
+    Linear/recurrent family
+        ├── Lightning Attention
+        ├── Gated DeltaNet
+        └── Kimi Delta Attention
+        ↓
+    Hybrid architectures

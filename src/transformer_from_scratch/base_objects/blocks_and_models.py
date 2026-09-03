@@ -80,7 +80,8 @@ class GPTModel(torch.nn.Module):
             total_blocks: int,
             num_heads: int,
             ff_intermediate_columns_multiplier: int = 4,
-            dropout_probability: float = 0.1
+            dropout_probability: float = 0.1,
+            tie_weights: bool = False
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -104,7 +105,19 @@ class GPTModel(torch.nn.Module):
             for _ in range(total_blocks)
         ])
         self.final_layer_norm = LayerNorm(embedding_dimension)
-        self.linear_to_vocab = LinearLayer(embedding_dimension, vocab_size)
+        # Weight tying is using the same table for token embedding and for the linear_to_vocab layer.
+        # The idea being that you save a lot of parameters since the (vocab_size, embedding_dim) table is ginormous.
+        # It usually performs worse than having an independent specialized table for the task though.
+        self.tie_weights = tie_weights
+        if tie_weights:
+            # Traditionally weight-tyings did not have a bias, but honestly the param cost is small, and it learns independently
+            # of the tied matrix. So there is really no reason not to include a bias.
+
+            # Creating the layer like this is fine because the embedding matrix is already (vocab_size, embedding_dim)
+            # which is already (out_features, in_features).
+            self.linear_to_vocab = LinearLayer(self.token_embeddings.embedding_matrix, torch.nn.Parameter(torch.zeros(vocab_size)))
+        else:
+            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dimension, vocab_size)
 
     def forward(self, inputs):
         """

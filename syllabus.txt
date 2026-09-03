@@ -1,12 +1,13 @@
 Modules to be added in the future:
-    RMSNormFunction & Layer (replacement of LayerNorm)
-    Gated Feed Forward
-    Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-attention-variants):
-    RotaryEmbedding / RoPE (the exact kind of implementations on how many dimensions needs to be seen)
-    KV Caching
     MoE Feedforward (working and gated with a load balancing loss)
-    Weight tying from embeddings to final linear projection to vocab size?
 
+Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-attention-variants):
+    • Read the article
+    • Create abstract bases/modular interfaces for different attentions based on their taxonomy
+    • Refer to and update attention syllabus and decide what to implement accordingly
+    Each attention subvariant basically requires its own rope and kv caching implementation :(
+        RotaryEmbedding / RoPE (the exact kind of implementations on how many dimensions needs to be seen)
+        KV Caching
 
 
 ----------------------------------------
@@ -39,7 +40,7 @@ Things that are done:
     Then other necessary objects and functions:
         --AdamW
         --Dropout Layer
-        --Gradient Clipping
+        --Gradient Clipping (cf trainer.utility.scale_down_large_gradients)
         --Model Config Obj
 
     Then assemble into a script to train the model
@@ -47,3 +48,8 @@ Things that are done:
         --Training Loop
         --Generation Loop
         --Checkpoint Manager
+
+    Modernizations:
+        -- RMSNorm Function & Layer (replacement of LayerNorm)
+        -- Gated Feed Forward
+        -- Weight tying (implemented as part of GPTModel as an optional param with comments explaining it at GPTModel.__init_)

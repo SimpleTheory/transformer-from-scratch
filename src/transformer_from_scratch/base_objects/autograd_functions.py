@@ -41,7 +41,7 @@ class relu(torch.autograd.Function):
 
 class wx_plus_b(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor, normal: bool = False, bias: bool = True):
+    def forward(ctx, inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor | None, normal: bool = False):
         """
         ... = all the leading dimensions
 
@@ -52,14 +52,13 @@ class wx_plus_b(torch.autograd.Function):
         :param weights: Tensor(out_features, in_features) (can be swapped if normal is True)
         :param biases: Tensor(out_features,)
         :param normal: If True makes it so weights takes (in_features, out_features)
-        :param bias: If False there is no addition by the bias
         :return: Tensor(..., out_features)
         """
         ctx.save_for_backward(inputs, weights, biases)
         ctx.normal = normal
-        ctx.bias = bias
+        ctx.bias = biases is not None
         # (b,i) @ (i, o) + (o,)
-        if bias:
+        if ctx.bias:
             return (inputs @ (weights if normal else weights.T)) + biases
         return inputs @ (weights if normal else weights.T)
 
@@ -131,17 +130,19 @@ class wx_plus_b(torch.autograd.Function):
         # basically 1 value left per column per batch
         # sum over all leading dimensions, keep out_features (which is the last dimension)
         if ctx.bias:
-            grad_biases = output_gradients.sum(dim=tuple(range(output_gradients.ndim - 1)))
+            # We can use the `flattened_output_gradient` to sum across all dimensions since all its higher dimensions were
+            # flattened to dimension 0.
+            grad_biases = flattened_output_gradient.sum(dim=0)
         else:
             grad_biases = None
 
         # Need to reshape grad_inputs for N to be ... just like the original input
-        # None, None is for the normal parameter and the bias parameter
-        return grad_inputs.reshape(inputs.shape), grad_weights, grad_biases, None, None
+        # None is for the `normal` parameter
+        return grad_inputs.reshape(inputs.shape), grad_weights, grad_biases, None
 
-def wx_plus_b_with_kwarg(inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor, normal: bool = False, bias: bool = True):
+def wx_plus_b_with_kwarg(inputs: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor | None, normal: bool = False):
     # Need this because you can't use `.apply` with kwargs
-    return wx_plus_b.apply(inputs, weights, biases, normal, bias)
+    return wx_plus_b.apply(inputs, weights, biases, normal)
 
 class softmax(torch.autograd.Function):
     @staticmethod

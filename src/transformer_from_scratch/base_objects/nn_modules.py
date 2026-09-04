@@ -6,21 +6,8 @@ import math
 Notes:
     - Don't use @dataclass for nn.Modules (while learning pytorch) because order matters when super init is called
     and the attributes are defined
-    
-    - Weight Initialization Scaling:
-            Generic/Unactivated Layer
-                1/sqrt(in_features)
-                • A generic linear layer at init should scaled by the 1/sqrt(in_features),
-                 though this could change from the activation function for example:
-            Xavier/Glorot style, often for tanh/sigmoid-ish balanced layers
-                W = torch.randn(in_features, out_features) * math.sqrt(2 / (in_features + out_features))
-            Kaiming/He style, often for ReLU networks
-                W = torch.randn(in_features, out_features) * math.sqrt(2 / in_features)
-            etc...
-        The reason you have to do this is that the activation function gates a lot of the output so the initial scale should be different
-        Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status!
-
 """
+
 class LinearLayer(torch.nn.Module):
     """
         Layer wx+b where
@@ -368,6 +355,82 @@ class MultiHeadAttention(torch.nn.Module):
         # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
         # AKA embedding_dim instead of columns if project_to_embedding_dim is True
         return autograd_functions.wx_plus_b_with_kwarg(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
+
+class InitWeightScaling:
+    """
+    Weight Initialization Scaling:
+
+        Generic/Unactivated Layer
+            1/sqrt(in_features)
+            • A generic linear layer at init should scaled by the 1/sqrt(in_features),
+             though this could change from the activation function for example:
+        Xavier/Glorot style, often for tanh/sigmoid-ish balanced layers
+            W = torch.randn(in_features, out_features) * math.sqrt(2 / (in_features + out_features))
+        Kaiming/He style, often for ReLU networks
+            W = torch.randn(in_features, out_features) * math.sqrt(2 / in_features)
+        etc...
+
+    The reason you have to do this is that the activation function gates a lot of the output so the initial scale should be different
+
+    Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status!
+    """
+
+    def __init__(self, *, in_features: int, out_features: int, activation: str = 'generic', **kwargs):
+        self.in_features = in_features
+        self.out_features = out_features
+        self.activation = activation.lower().strip()
+        self.kwargs = kwargs
+
+    def generic(self) -> float:
+        # Fan-in
+        return 1/math.sqrt(self.in_features)
+
+    def tanh_style(self) -> float:
+        # Xavier
+        return math.sqrt(2 / (self.in_features + self.out_features))
+
+    def relu_style(self) -> float:
+        # Kaiming-He
+        return math.sqrt(2 / self.in_features)
+
+    def static_style(self) -> float:
+        # Use this key for a static multiplier
+        return self.kwargs['static_multiplier']
+
+    def static_style_on_residuals(self):
+        blocks = self.kwargs['num_transformer_blocks']
+        adds = self.kwargs['residual_additions']  # _per_block
+        return self.kwargs['static_multiplier'] / math.sqrt(blocks * adds)
+
+    def get_init_scaling_const(self) -> float:
+        if self.activation in ('', 'generic', 'default'):
+            return self.generic()
+        elif self.activation.endswith('lu'):
+            return self.relu_style()
+        elif self.activation in ('tanh', 'sigmoid'):
+            return self.tanh_style()
+        elif self.activation == 'static':
+            return self.static_style()
+        elif self.activation == 'static_residual':
+            return self.static_style_on_residuals()
+        else:
+            raise ValueError(f'No init scaling const found for scaling-type {self.activation}')
+
+    @staticmethod
+    def get_const(in_features: int, out_features: int, activation: str = 'generic', **kwargs):
+        cls = InitWeightScaling(in_features=in_features, out_features=out_features, activation=activation, **kwargs)
+        return cls.get_init_scaling_const()
+
+def create_weights(in_features: int, out_features: int, activation: str = 'generic', **kwargs) -> torch.nn.Parameter:
+    # Should be formatted out then in
+    return torch.nn.Parameter(
+        torch.randn(out_features, in_features)
+        *
+        InitWeightScaling.get_const(in_features, out_features, activation, **kwargs)
+    )
+
+def create_biases(out_features):
+    return torch.nn.Parameter(torch.zeros(out_features))
 
 def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
         # Attention matrix is (... , Sequence Length, Sequence Length)

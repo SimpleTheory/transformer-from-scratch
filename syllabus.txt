@@ -1,7 +1,3 @@
-Modules to be added in the future:
-    MoE Feedforward (working and gated with a load balancing loss)
-    Modularize weight init scaling into functions
-
 Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-attention-variants):
     • Read the article
     • Create abstract bases/modular interfaces for different attentions based on their taxonomy
@@ -9,6 +5,10 @@ Popular Attention Subvariants (https://magazine.sebastianraschka.com/p/visual-at
     Each attention subvariant basically requires its own rope and kv caching implementation :(
         RotaryEmbedding / RoPE (the exact kind of implementations on how many dimensions needs to be seen)
         KV Caching
+
+Modules to be added in the future:
+    Deepseek style MoE
+    -- Modularize weight init scaling into functions (Made the functions but haven't refactored usage instances)
 
 
 ----------------------------------------
@@ -54,3 +54,4 @@ Things that are done:
         -- RMSNorm Function & Layer (replacement of LayerNorm)
         -- Gated Feed Forward
         -- Weight tying (implemented as part of GPTModel as an optional param with comments explaining it at GPTModel.__init_)
+        -- Mistral Style MoE Feedforward (gated with a load balancing loss)

@@ -1,4 +1,7 @@
 import typing
+
+import torch.nn
+
 from nn_modules import *
 import autograd_functions_modernization
 
@@ -163,46 +166,66 @@ class RMSNorm(torch.nn.Module):
         return autograd_functions_modernization.rms_norm.apply(input_tensor, self.weights, self.tiny_num_to_avoid_dev_by_0)
 
 
-class MoEDoubleLinearApplied(torch.nn.Module):
-    # TODO: This MoE FF is ungated
-    # TODO: This MoE needs a load balancing loss to make sure the inputs don't all go to the same expert
-    def __init__(self,
-                 total_number_of_experts: int,
-                 experts_to_accept: int,
-                 in_columns: int,
-                 intermediate_columns: int,
-                 activation_func: torch.autograd.Function = autograd_functions.gelu,
-                 out_columns: int = None,
-                 initialization_scaling: float = None
-                 ):
+class MistralStyleMoEGatedFFN(torch.nn.Module):
+    def __init__(
+            self,
+            total_number_of_experts: int,
+            experts_to_accept: int,
+            in_columns: int,
+            intermediate_columns: int | float = 8 / 3,
+            intermediate_columns_as_multiplier: bool = True,
+            out_columns: int = None,  # Default should be same as in columns
+            activation_func=autograd_functions.silu,
+            bias: bool = True
+    ):
         super().__init__()
-        # Keep dimensionality by default for residuals
-        if out_columns is None:
-            out_columns = in_columns
-        # Kaiming initialization for gelu style default activation functions
-        if initialization_scaling is None:
-            initialization_scaling = math.sqrt(2/in_columns)
+
         if experts_to_accept > total_number_of_experts:
             raise ValueError(f"{experts_to_accept=} cannot be greater than {total_number_of_experts=}")
+        if total_number_of_experts < 1:
+            raise ValueError(f'Your total number of experts {total_number_of_experts} must be greater than 1')
+        if not 1 <= experts_to_accept <= total_number_of_experts:
+            raise ValueError(f'This statement at MoE is False: 1 <= experts_to_accept <= total_number_of_experts\n'
+                             f'1 <= {experts_to_accept} <= {total_number_of_experts}')
+
         self.total_number_of_experts = total_number_of_experts
         self.experts_to_accept = experts_to_accept
-        self.in_columns = in_columns
-        self.intermediate_columns = intermediate_columns
-        self.activation_func = activation_func
-        self.out_columns = out_columns
-        self.initialization_scaling = initialization_scaling
-        # This must be a ModuleList so PyTorch registers the experts' parameters.
-        # Otherwise, optimizer.parameters(), state_dict(), etc. will not include them.
+        # Bias is False here because a bias (in this topk MoE implementation) gives each expert a global preference independent of the token.
+        self.gate = LinearLayer.from_feature_counts(in_columns, total_number_of_experts, bias=False)
+
         self.experts = torch.nn.ModuleList([
-            DoubleLinearApplied(in_columns, intermediate_columns, out_columns, activation_func, initialization_scaling)
+            GatedFFN(in_columns, intermediate_columns, intermediate_columns_as_multiplier, out_columns, activation_func, bias)
             for _ in range(total_number_of_experts)
         ])
-        self.gate = LinearLayer.from_feature_counts(in_columns, total_number_of_experts)
 
-    def forward(self, input_tensor):
+    def __getattr__(self, item):
+        err = AttributeError(f"'{type(self).__name__}' object has no attribute '{item}'")
+        try:
+            return super().__getattr__(item)
+        except AttributeError:
+            pass  # It's not a standard PyTorch attribute, look at the experts next
+        if '_modules' in self.__dict__ and 'experts' in self._modules and len(self.experts) > 0:
+            try:
+                return getattr(self.experts[0], item)
+            except IndexError as e:
+                raise AttributeError(f'{item} was not found in {type(self).__name__}, however the experts list is'
+                                     f' currently empty. If this was an expert attribute make sure to populate the'
+                                     f' experts before accessing this attribute.') from e
+            except AttributeError as e:
+                raise err from e
+        raise err
+
+    @property
+    def out_columns(self) -> int:
+        return self.experts[0].out_columns
+
+    def forward(self, input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         :param input_tensor: Batch Size, Sequence Length, Embedding Dimensions
-        :return: Batch Size, Sequence Length, Out Columns
+        :return: Tuple(
+            Tensor(Batch Size, Sequence Length, Out Columns),
+            Scalar as 0 dimensional Tensor: (Auxiliary Loss)
+        )
         """
         batch_size, sequence_length, embedding_dims = input_tensor.shape
         # Sanity check on input
@@ -266,13 +289,13 @@ class MoEDoubleLinearApplied(torch.nn.Module):
         hits_per_expert = torch.bincount(
             flattened_expert_index,
             minlength=self.total_number_of_experts,
-        ).tolist()
+        )
 
         # Create an output buffer
         result = torch.zeros(n, self.out_columns, device=input_tensor.device, dtype=input_tensor.dtype)
 
         start = 0
-        for current_expert, hits in enumerate(hits_per_expert):
+        for current_expert, hits in enumerate(hits_per_expert.tolist()):
             if hits == 0:
                 continue
             # Create a slice object for the current expert
@@ -299,5 +322,77 @@ class MoEDoubleLinearApplied(torch.nn.Module):
             # Adjust the start for the next slice
             start = end
 
+        # Calculate Auxiliary / Load Balancing Loss
+        auxiliary_loss = self.load_balancing_loss(
+            hits_per_expert,
+            self.get_router_probabilities(scores),
+        )
+
         # Reshape the buffer to (Batch Size, Sequence Length, Out Columns)
-        return result.reshape(batch_size, sequence_length, self.out_columns)
+        return result.reshape(batch_size, sequence_length, self.out_columns), auxiliary_loss
+
+    @staticmethod
+    def get_router_probabilities(scores: torch.Tensor) -> torch.Tensor:
+        """
+        Softmax the scores to get the probability of each router for each token.
+        Where every element is the score that token gets for that specific router. Hence, the var name `scores`.
+        :param scores: (Total Tokens, Total Experts) The score the gate gives for each expert.
+        :return: (...) Softmaxed for each token giving you a probability for each router at each token.
+        """
+        return autograd_functions.softmax_with_kwarg(
+            scores,
+            dim=-1,
+        )
+
+    def load_balancing_loss(
+            self,
+            hits_per_expert: torch.Tensor,
+            router_probabilities: torch.Tensor,
+            # coefficient: float = .01,
+    ) -> torch.Tensor:
+        # router_probabilities is (Total Tokens, Total Experts), thus
+        total_token_count = router_probabilities.shape[0]
+        # The amount of times an expert was selected because each token goes to the top-k experts,
+        # hence: total_token_count * experts_to_accept
+        total_times_an_expert_was_selected = total_token_count * self.experts_to_accept
+
+        # This is a fraction for each expert re: the total amount of times it was selected / total selections
+        ratios_per_expert = hits_per_expert / total_times_an_expert_was_selected
+
+        # This is the average per router not per token take  for example
+        #            R0    R1    R2    R3
+        # Token 0: [0.70, 0.10, 0.10, 0.10]
+        # Token 1: [0.50, 0.20, 0.20, 0.10]
+        # Token 2: [0.60, 0.10, 0.20, 0.10]
+
+        # This will give the average (across the rows aka) for each column giving a list of (R,) where each value is that R's average
+        # This differs from the above in that this is the average (softmax) probability any given token had to go to a router
+        # Additionally this is the differentiable path our loss will learn from: (E = total experts) (N = Sequence Length)
+                # gate: weights & bias
+                # ↓
+                # scores = self.gate(flattened_input)(N, E)
+                # ↓
+                # router_probabilities = softmax(scores)(N, E)
+                # ↓
+                # average_router_probability = mean(dim=0)(E,)
+        # The other var `ratios_per_expert` is undifferentiable because it is intrinsically linked to top-k which is discrete
+        average_router_probability = router_probabilities.mean(dim=0)
+
+        # The reason you multiply by the number of experts is `ratios_per_expert` (ideally) is 1/E and `avg_router_probability` is (ideally) 1/E as well.
+        # Though, that correlates your load balancing loss on E so let's do a walk through given an ideal situation:
+
+        # In an ideal setting
+        # ratios = [0.25, 0.25, 0.25, 0.25]
+        # probs = [0.25, 0.25, 0.25, 0.25]
+        # Multiply them elementwise
+        # [0.0625, 0.0625, 0.0625, 0.0625] aka [1/E**2]
+        # Sum the list (because the list is size E when you sum it is effectively the same as condensing all the values into 1 and doing * e)
+        # 0.25 aka (1/E)
+        # However notice that the loss number achieved here is still intrinsically correlated with our total number of experts
+        # Thus to make it independent we have to multiply by E.
+        # Even though the final ideal loss ends up being 1 gradient descent looks for changes that make improvements
+        # Since there are no improvements it will stay there.
+        auxiliary_loss = self.total_number_of_experts * torch.sum(ratios_per_expert * average_router_probability)
+
+        # Returns Scalar as 0 dimensional Tensor
+        return auxiliary_loss  # * coefficient

@@ -1,7 +1,7 @@
 from pathlib import Path
 import torch
 from transformer_from_scratch.base_objects.blocks_and_models import GPTModel
-import transformer_from_scratch.trainer.trainer as trainer
+import transformer_from_scratch.trainer as trainer
 import tiktoken
 from transformer_from_scratch.trainer.utility import to_device
 
@@ -80,12 +80,13 @@ if __name__ == '__main__':
     to_device(model)
 
     model.load_state_dict(torch.load(config.load_path))
-    prompt = "If she comes in time, we"
+    prompt = "and the elf turned into a goblin"
     repeat_times = 5
-    start_with_eot = True
-    out = convenient_generate([prompt]*repeat_times, start_with_eot=start_with_eot)
+    start_with_eot = False
+    out = convenient_generate(prompt, start_with_eot=start_with_eot)
     # out = convenient_generate('The princess was poisoned by an apple and fell into a deep sleep')
-    save_to_file(
-        trainer.data_dir / 'inference_outputs/she_comes_in_time_3.txt',
-        out,
-f'PROMPT: {prompt}\nTIMES REPEATED: {repeat_times}\nSTART W/ EOT: {start_with_eot}\n--------------------\n')
+    print(out)
+#     save_to_file(
+#         trainer.data_dir / 'inference_outputs/she_comes_in_time_3.txt',
+#         out,
+# f'PROMPT: {prompt}\nTIMES REPEATED: {repeat_times}\nSTART W/ EOT: {start_with_eot}\n--------------------\n')

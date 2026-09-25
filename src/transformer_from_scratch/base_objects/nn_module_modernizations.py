@@ -1,9 +1,7 @@
 import typing
-
 import torch.nn
-
-from nn_modules import *
-import autograd_functions_modernization
+from transformer_from_scratch.base_objects.nn_modules import *
+import transformer_from_scratch.base_objects.autograd_functions_modernization as autograd_modernizations
 
 
 class GatedFFN(torch.nn.Module):
@@ -154,7 +152,7 @@ class RMSNorm(torch.nn.Module):
     """
     To see the details about RMSNorm please refer to `autograd_functions_modernization.rms_norm`
     """
-    def __init__(self, trailing_dim_of_input: int, tiny_num_to_avoid_dev_by_0=1e-5):
+    def __init__(self, trailing_dim_of_input: int, tiny_num_to_avoid_dev_by_0=1e-6):
         super().__init__()
         self.trailing_dim_of_input = trailing_dim_of_input
         self.tiny_num_to_avoid_dev_by_0 = tiny_num_to_avoid_dev_by_0
@@ -163,7 +161,7 @@ class RMSNorm(torch.nn.Module):
         self.weights = torch.nn.Parameter(torch.ones(trailing_dim_of_input))
 
     def forward(self, input_tensor):
-        return autograd_functions_modernization.rms_norm.apply(input_tensor, self.weights, self.tiny_num_to_avoid_dev_by_0)
+        return autograd_modernizations.rms_norm.apply(input_tensor, self.weights, self.tiny_num_to_avoid_dev_by_0)
 
 
 class MistralStyleMoEGatedFFN(torch.nn.Module):
@@ -396,3 +394,51 @@ class MistralStyleMoEGatedFFN(torch.nn.Module):
 
         # Returns Scalar as 0 dimensional Tensor
         return auxiliary_loss  # * coefficient
+
+
+def apply_causal_mask_with_cache(attention_scores: torch.Tensor):
+    """
+    Applies a causal mask to attention scores when using a KV cache.
+
+    Expected shape:
+        attention_scores:
+            (..., newest_tokens, sequence_length)
+
+    Where:
+        total_tokens = cached_tokens + newest_tokens
+
+    Example:
+        cached_tokens = 5
+        newest_tokens = 3
+
+        Query positions: [5, 6, 7]
+        Key positions:   [0, 1, 2, 3, 4, 5, 6, 7]
+
+        Result:
+            Q5 can attend to K0-K5
+            Q6 can attend to K0-K6
+            Q7 can attend to K0-K7
+    """
+
+    newest_tokens = attention_scores.shape[-2]
+    total_tokens = attention_scores.shape[-1]
+    cached_tokens = total_tokens - newest_tokens
+
+    query_positions = torch.arange(
+        cached_tokens,
+        cached_tokens + newest_tokens,
+        device=attention_scores.device
+    )  # (Given example) range(5, 8)
+
+    key_positions = torch.arange(
+        total_tokens,
+        device=attention_scores.device
+    )  # (Given example) range(8)
+
+    # Shape: (newest_tokens, total_tokens
+    # Given example unsqueezed to (1,8) & (3,1) for broadcast such that row 1 of (3,1) would broadcast to all 8 columns
+    # with the equation (value in row 1 > value in broadcasted column) then row 2 would broadcast to all 8 columns etc.
+    causal_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)
+
+    # The mask is a table of bools the masked fill allows the regular values in true and replaces -inf in false
+    return attention_scores.masked_fill(causal_mask, float("-inf"))

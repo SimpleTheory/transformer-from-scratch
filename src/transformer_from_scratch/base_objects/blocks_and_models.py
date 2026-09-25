@@ -1,5 +1,7 @@
+import torch.nn
 from transformer_from_scratch.base_objects.nn_module_modernizations import *
-from transformer_from_scratch.base_objects.autograd_functions import *
+from transformer_from_scratch.base_objects.attention_variants import *
+from transformer_from_scratch.base_objects.autograd_functions_modernization import *
 
 class TransformerBlock(torch.nn.Module):
     # TODO class level doc comment
@@ -225,3 +227,199 @@ class GPTModel(torch.nn.Module):
         # Now we return the token ids with all the new tokens in them. For actually displaying the results though like on
         # a chatbot you could hide the original prompt or the whole context with some regular code.
         return token_ids
+
+class SmallQwen3Block(torch.nn.Module):
+    def __init__(
+            self,
+            embedding_dim,
+            num_of_heads: int,
+            num_of_kv_groups: int,
+            rope_params: RopeParameters,
+            dimensions_per_head: int | None = None,
+            columns: int | None = None,
+            project_to_embedding_dim: bool = True,
+            rope_dimensions: int | None = None,
+            ffn_intermediate_size: int = 3072,
+            ffn_size_as_multiplier: bool = False
+    ):
+        super().__init__()
+        self.attention = GHQ(
+            embedding_dim,
+            num_of_heads,
+            num_of_kv_groups,
+            # Since it is a class the idea is that I am referencing it by memory and not creating
+            # a bajillion copies of something constant.
+            rope_params,
+            dimensions_per_head if dimensions_per_head is not None else embedding_dim // num_of_heads,
+            columns,
+            project_to_embedding_dim,
+            rope_dimensions,
+        )
+        self.ffn = GatedFFN(embedding_dim, intermediate_columns=ffn_intermediate_size, intermediate_columns_as_multiplier=ffn_size_as_multiplier, bias=False)
+        self.norm1 = RMSNorm(embedding_dim)
+        self.norm2 = RMSNorm(embedding_dim)
+        self.cache: GHQCache | None = None
+
+    def reset_cache(self):
+        self.cache = None
+
+    def forward(self, inputs, use_cache=False):
+        calculation_result, updated_cache = self.attention(self.norm1(inputs), self.cache, use_cache=use_cache)
+        if use_cache:
+            self.cache = updated_cache
+        inputs = inputs + calculation_result
+
+        calculation_result = self.ffn(self.norm2(inputs))
+
+        return inputs + calculation_result
+
+class SmallQwen3Model(torch.nn.Module):
+    """
+    number of blocks
+    embedding_dim,
+    num_of_heads: int,
+    num_of_kv_groups: int MUST BE (NUM-HEADS % KV-GROUPS == 0),
+    rope_params: RopeParameters,
+    columns: int | None = None,
+    project_to_embedding_dim: bool = True,
+    rope_dimensions: int | None = None,
+
+    QWEN_CONFIG_06_B = {
+    "vocab_size": 151_936,     # Vocabulary size
+    "context_length": 40_960,  # Length originally used during training (though it was actually 32,768 the rest was a buffer)
+    "emb_dim": 1024,           # Embedding dimension
+    "n_heads": 16,             # Number of attention heads
+    "n_layers": 28,            # Number of layers
+    "hidden_dim": 3072,        # Size of intermediate dim in FeedForward
+    "head_dim": 128,           # Size of the heads in GQA
+    "qk_norm": True,           # Whether to normalize queries & keys in GQA (always true in my model though I can make it modular later)
+    "n_kv_groups": 8,          # Key-Value groups for GQA
+    "rope_base": 1_000_000.0,  # The base in RoPE's "theta"
+    "dtype": torch.bfloat16,   # Lower-precision dtype to reduce memory
+}
+    """
+    def __init__(
+            self,
+            vocab_size: int,
+            max_sequence_length: int,
+            embedding_dim: int,
+            num_of_heads: int,
+            num_of_kv_groups: int,
+            dimensions_per_head: int | None = None,
+            columns: int | None = None,
+            num_of_blocks: int = 28,
+            rope_dimensions: int | None = None,  # If none will default to all of a head's dimensions
+            rope_base: int = 1_000_000,  # The base in RoPE's "theta"
+            ff_intermediate_size: int = 3072,
+            ffn_size_as_multiplier: bool = False,
+            tie_weights: bool = True,
+            dtype: torch.dtype = torch.bfloat16,  # TODO Apply this dtype to all the sub functions via modifying them and their params
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.max_sequence_length = max_sequence_length
+        self.embedding_dim = embedding_dim
+        self.num_of_heads = num_of_heads
+        self.num_of_kv_groups = num_of_kv_groups
+        self.ffn_intermediate_size = ff_intermediate_size
+        self.dimensions_per_head = dimensions_per_head if dimensions_per_head is not None else self.calculate_head_dim()
+        self.rope_dimensions = rope_dimensions if rope_dimensions is not None else self.dimensions_per_head
+
+        # columns: int | None = None,
+        # number_of_blocks: int = 28,
+
+        # Rope is applied per head not on the total embedding!
+        self.rope_params: RopeParameters = compute_basic_rope_params(self.rope_dimensions, max_sequence_length, theta_base=rope_base)
+
+        self.embedding_layer = EmbeddingLayer(vocab_size, embedding_dim)
+        self.final_norm = RMSNorm(embedding_dim)
+
+        if tie_weights:
+            self.linear_to_vocab = LinearLayer(self.embedding_layer.embedding_matrix, None)
+        else:
+            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dim, vocab_size, bias=False)
+
+        self.attention_blocks = torch.nn.ModuleList([SmallQwen3Block(
+            embedding_dim=embedding_dim,
+            num_of_heads=num_of_heads,
+            num_of_kv_groups=num_of_kv_groups,
+            rope_params=self.rope_params,
+            dimensions_per_head=self.dimensions_per_head,
+            columns=columns,
+            rope_dimensions=rope_dimensions,
+            ffn_intermediate_size=ff_intermediate_size,
+            ffn_size_as_multiplier=ffn_size_as_multiplier
+        ) for _ in range(num_of_blocks)])
+        
+    def forward(self, inputs, reset_cache=False, use_cache=False):
+        if reset_cache:
+            self.reset_cache()
+        self.verify_input(inputs)
+
+        data_to_work_on = self.embedding_layer(inputs)
+        for block in self.blocks:
+            data_to_work_on = block(data_to_work_on, use_cache)
+        logits = self.linear_to_vocab(self.final_norm(data_to_work_on))
+
+        return logits
+
+    @torch.no_grad()
+    def generate(self, token_ids: torch.Tensor, max_new_tokens: int):
+        raise NotImplementedError()  # TODO
+
+    @property
+    def blocks(self):
+        return self.attention_blocks
+
+    @property
+    def num_of_blocks(self):
+        return len(self.attention_blocks)
+
+    def calculate_head_dim(self):
+        return self.embedding_dim // self.num_of_heads
+
+    def reset_cache(self):
+        for block in self.blocks:
+            block.reset_cache()
+
+    def verify_input(self, inputs, use_cache=False):
+        batch_size, sequence_length = inputs.shape
+        cached_length = 0
+        if use_cache and self.blocks[0].cache is not None:
+            cached_length = self.blocks[0].cache.current_position()
+        total_sequence_length = cached_length + sequence_length
+        if total_sequence_length > self.max_sequence_length:
+            raise ValueError(
+                f"Total sequence length {total_sequence_length} exceeds "
+                f"max_sequence_length={self.max_sequence_length} "
+                f"({cached_length} cached + {sequence_length} new)"
+            )
+        if use_cache and self.blocks[0].cache is not None:
+            cached_batch_size = self.blocks[0].cache.key.shape[0]
+            if batch_size != cached_batch_size:
+                raise ValueError(f'batch_size != cached_batch_size {batch_size} != {cached_batch_size}')
+
+    @staticmethod
+    def config_factory(return_instance=True):
+        # Default Configuration for Qwen3 0.6B
+        from transformer_from_scratch.trainer.utility import CommandLineArguments
+
+        class Config(CommandLineArguments):
+            vocab_size: int = 151_936  # Vocabulary size
+            max_sequence_length: int = 40_960  # Length originally used during training (though it was actually 32,768 the rest was a buffer)
+            embedding_dim: int = 1024  # Embedding dimension
+            num_of_heads: int = 16  # Number of attention heads
+            num_of_blocks: int = 28  # Number of layers
+            ffn_intermediate_size: int = 3072  # Size of intermediate dim in FeedForward
+            ffn_size_as_multiplier: bool = False
+            dimensions_per_head: int = 128  # Size of the heads in GQA
+            # "qk_norm": True,  # Whether to normalize queries & keys in GQA (always true in my model though I can make it modular later)
+            num_of_kv_groups: int = 8  # Key-Value groups for GQA
+            rope_base: int = 1_000_000  # The base in RoPE's "theta"
+            tie_weights: bool = True
+            dtype: torch.dtype = torch.bfloat16
+
+        if return_instance:
+            return Config()
+        return Config
+

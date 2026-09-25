@@ -6,7 +6,7 @@ from typing import Callable, Iterator, Any
 import torch.utils.data
 import torch
 import time
-import utility
+import transformer_from_scratch.trainer.utility as utility
 import csv
 
 # <editor-fold desc="Slot-in Functions">

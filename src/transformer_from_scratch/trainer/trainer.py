@@ -2,7 +2,7 @@ from pathlib import Path
 import transformer_from_scratch.base_objects as base
 from datasets import load_dataset
 import transformer_from_scratch.local_dataset_code as local_dataset_code
-import training_framework
+import transformer_from_scratch.trainer.training_framework as training_framework
 # import dataset_code
 # import nn_modules
 # import autograd_functions

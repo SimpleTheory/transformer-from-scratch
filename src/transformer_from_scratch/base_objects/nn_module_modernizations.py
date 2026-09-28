@@ -57,7 +57,8 @@ class GatedFFN(torch.nn.Module):
             # set to 1.0 if you don't want init scaling: default is kaiming-he
             # generic_initialization_scaling: float = None,
             gate_initialization_scaling: float = None,
-            bias=True
+            bias=True,
+            dtype=None
     ):
         """
         A macro for a triple linear layer where on acts as a gate with an activation function. The idea is to blow up the hidden space to let the
@@ -94,39 +95,30 @@ class GatedFFN(torch.nn.Module):
         self.activation_func = self.get_activation_function(activation_func)
         # self.generic_initialization_scaling = generic_initialization_scaling if generic_initialization_scaling is not None else 1/math.sqrt(in_columns)
         # Using kaiming-he scaling because activation function will likely be relu or gelu or silu
-        self.gate_initialization_scaling = gate_initialization_scaling if gate_initialization_scaling is not None else (math.sqrt(2/in_columns))
+        self.gate_initialization_scaling = gate_initialization_scaling
         self.bias = bias
         # </editor-fold>
 
-        # Divided by sqrt(in_columns) for generic initialization, down_weights have this as well
-        self.up_weights = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns) / math.sqrt(in_columns))
+        self.up = LinearLayer.from_feature_counts(in_columns, intermediate_columns, bias=bias, dtype=dtype)
         # Init scaling here because of activation function, though this can be changed by the parameters
-        self.gate_weights = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns) * self.gate_initialization_scaling)
-        self.down_weights = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns) / math.sqrt(intermediate_columns))
-
-        # Bias initialization
-        if bias:
-            self.up_biases = torch.nn.Parameter(torch.zeros(intermediate_columns))
-            self.gate_biases = torch.nn.Parameter(torch.zeros(intermediate_columns))
-            self.down_biases = torch.nn.Parameter(torch.zeros(out_columns))
+        self.gate = LinearLayer.from_feature_counts(
+            in_columns,
+            intermediate_columns,
+            activation=activation_func,
+            bias=bias,
+            initialization_scaling=gate_initialization_scaling,
+            dtype=dtype
+        )
+        self.down = LinearLayer.from_feature_counts(intermediate_columns, out_columns, bias=bias, dtype=dtype)
 
     def forward(self, input_tensor):
         """
-        This is just the below but more verbose and with biases if they were added:
-            up_scale = input @ up_weights
-            gate = activation_func(input @ gate_weights)
-            intermediate = up_scale * gate
-            result = intermediate @ down_weights
         :param input_tensor: (..., in columns)
         :return: (..., out columns)
         """
-        up_scale = autograd_functions.wx_plus_b_with_kwarg(input_tensor, self.up_weights, self.get_attr('up_biases'))
-        gate = self.activation_func(
-            autograd_functions.wx_plus_b_with_kwarg(input_tensor, self.gate_weights, self.get_attr('gate_biases'))
-        )
-        intermediate = up_scale * gate
-
-        return autograd_functions.wx_plus_b_with_kwarg(intermediate, self.down_weights, self.get_attr('down_biases'))
+        upscale = self.up(input_tensor)
+        gate = self.activation_func(self.gate(input_tensor))
+        return self.down(upscale * gate)
 
     @staticmethod
     def get_activation_function(activation) -> typing.Callable[[torch.Tensor], torch.Tensor]:
@@ -152,13 +144,13 @@ class RMSNorm(torch.nn.Module):
     """
     To see the details about RMSNorm please refer to `autograd_functions_modernization.rms_norm`
     """
-    def __init__(self, trailing_dim_of_input: int, tiny_num_to_avoid_dev_by_0=1e-6):
+    def __init__(self, trailing_dim_of_input: int, tiny_num_to_avoid_dev_by_0=1e-6, dtype=None):
         super().__init__()
         self.trailing_dim_of_input = trailing_dim_of_input
         self.tiny_num_to_avoid_dev_by_0 = tiny_num_to_avoid_dev_by_0
         # The weight is initialized to 1 to start with no scale after the normalization by default.
         # From there it can learn the scale that it should reapply.
-        self.weights = torch.nn.Parameter(torch.ones(trailing_dim_of_input))
+        self.weights = torch.nn.Parameter(torch.ones(trailing_dim_of_input, dtype=dtype))
 
     def forward(self, input_tensor):
         return autograd_modernizations.rms_norm.apply(input_tensor, self.weights, self.tiny_num_to_avoid_dev_by_0)
@@ -174,7 +166,8 @@ class MistralStyleMoEGatedFFN(torch.nn.Module):
             intermediate_columns_as_multiplier: bool = True,
             out_columns: int = None,  # Default should be same as in columns
             activation_func=autograd_functions.silu,
-            bias: bool = True
+            bias: bool = True,
+            dtype=None,
     ):
         super().__init__()
 
@@ -189,10 +182,11 @@ class MistralStyleMoEGatedFFN(torch.nn.Module):
         self.total_number_of_experts = total_number_of_experts
         self.experts_to_accept = experts_to_accept
         # Bias is False here because a bias (in this topk MoE implementation) gives each expert a global preference independent of the token.
-        self.gate = LinearLayer.from_feature_counts(in_columns, total_number_of_experts, bias=False)
+        self.gate = LinearLayer.from_feature_counts(in_columns, total_number_of_experts, dtype=dtype, bias=False)
 
         self.experts = torch.nn.ModuleList([
-            GatedFFN(in_columns, intermediate_columns, intermediate_columns_as_multiplier, out_columns, activation_func, bias)
+            GatedFFN(in_columns, intermediate_columns, intermediate_columns_as_multiplier,
+                     out_columns, activation_func, bias=bias, dtype=dtype)
             for _ in range(total_number_of_experts)
         ])
 

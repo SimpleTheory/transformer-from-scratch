@@ -1,6 +1,8 @@
 import torch
 from torch.autograd.function import FunctionCtx
 import math
+import transformer_from_scratch.base_objects.utility as utility
+
 
 """
 --LinearFunction (wx_plus_b)
@@ -194,10 +196,12 @@ class softmax(torch.autograd.Function):
                 - (output_gradients * softmax_output).sum(dim=ctx.dim, keepdim=True)
         ), None
 
+@utility.upscale()
 def softmax_with_kwarg(input_tensor: torch.Tensor, dim: int = -1):
     # Need this because you can't use `.apply` with kwargs
     return softmax.apply(input_tensor, dim)
 
+@utility.upscale_autograd()
 class layer_normalization(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -454,9 +458,11 @@ class cross_entropy(torch.autograd.Function):
             raise RuntimeError(f"Unexpected reduction: {ctx.reduction}")
         return gradient_probabilities, None, None
 
+@utility.upscale()
 def cross_entropy_with_kwarg(probabilities: torch.Tensor, targets: torch.Tensor, reduction: str = "mean"):
     return cross_entropy.apply(probabilities, targets, reduction)
 
+@utility.upscale_autograd()
 class softmaxed_cross_entropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, results_of_model_tensor, targets):
@@ -486,7 +492,7 @@ class softmaxed_cross_entropy(torch.autograd.Function):
         aka
             `ln(sum([e**i for i in list_of_num])) - correct class' value`
         :param results_of_model_tensor: (batch_size, sequence_length, vocab_size)
-        :param targets: (batch_size, sequence_length)
+        :param targets: (batch_size, sequence_length) The entire sequence represented as token ids (for each batch)
         :return: Scalar mean of loss per token per batch
         """
         # Shift to prevent overflow

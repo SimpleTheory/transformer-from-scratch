@@ -25,10 +25,180 @@ in the table on the fly with each new entry relative to what the new entry is. I
 it uses to update the block's original table essentially using itself as the thing that needed to be predicted along
 with appending itself to the memory table.
 """
+
 import torch
 import transformer_from_scratch.base_objects.autograd_functions_modernization as autograd_functions
 import transformer_from_scratch.base_objects.nn_module_modernizations as nn_modules
+from transformer_from_scratch.base_objects.nn_modules import LinearLayer, apply_mask
 import math
+
+
+class SingleHeadAttention(torch.nn.Module):
+    def __init__(self, embedding_dim: int, columns: int = None, dtype=None):
+        """
+        Todo write about the concepts behind single head attention
+        :param embedding_dim:
+        :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
+        the embedding_dim value
+        """
+        super().__init__()
+        self.columns: int = columns if columns else embedding_dim
+        if self.columns <= 0:
+            raise ValueError(f'Dimension size must be over 0 {columns=}')
+
+        self.create_query = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+        self.create_key = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+        self.create_value = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+
+    def forward(self, inputs, mask=True):
+        """
+        :param inputs: (Batch Size, Sequence Length, Embedding Dim)
+        :param mask: Whether or not a mask should be applied to the attention matrix (so that tokens can't see into the future)
+        :return: (Batch Size, Sequence Length, Columns)
+        """
+        # Each is now (Batch Size, Sequence Length, Columns)
+        query = self.create_query(inputs)
+        key = self.create_key(inputs)
+        value = self.create_value(inputs)
+
+        # The final attention matrix should be (Seq Len, Seq Len) (essentially every token by every token)
+        # To get that we need to transpose either the Q or K (by convention the K) to get
+            # (Seq Len, Columns) @ (Columns, Seq Len)
+        # .transpose(-2, -1) transposes the 2nd to last dimension with the last dimension
+            # so (768, 12, 4) -> (768, 4, 12)
+        # (Seq Len, Columns) @ (Columns, Seq Len) -> (Seq, Seq)
+        attention_matrix = query @ key.transpose(-2, -1)
+        # Scaled by the size of the hidden space (for some reason)(, avoided inplace operation for pytorch debugging)
+        attention_matrix = attention_matrix / math.sqrt(self.columns)
+        if mask:
+            attention_matrix = apply_mask(attention_matrix)
+        # Apply softmax to get a score for each (token x token) that the value matrix can use
+        attention_matrix = autograd_functions.softmax_with_kwarg(attention_matrix, dim=-1)
+
+        # Multiply the scores of each token x token to the value matrix
+        # (batch_size, seq_len, seq_len) @ (batch_size, seq_len, columns)
+
+        return attention_matrix @ value  # Return (Batch Size, Sequence Length, Columns)
+
+
+class MultiHeadAttention(torch.nn.Module):
+    def __init__(self, embedding_dim: int, num_of_heads: int, columns: int = None, project_to_embedding_dim: bool = True, dtype=None):
+        """
+        Todo write about the concepts behind multihead attention
+        :param embedding_dim: The embedding_dim/channels/hidden_space/whatever you want to call it of the input
+        :param num_of_heads: The number of heads to split the columns to. The following must be true (self.columns % num_of_heads == 0)
+        :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
+        the embedding_dim value
+        :param project_to_embedding_dim: If `True` projects the final return of the forward pass to (batch_size, sequence_length, embedding_dim)
+        if `False` the forward pass returns (batch_size, sequence_length, columns)
+        """
+        super().__init__()
+
+        # <editor-fold desc="Input Validation & Attribute Creation">
+        if not isinstance(embedding_dim, int):
+            raise TypeError("embedding_dim must be an int")
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be positive")
+        if columns is not None and not isinstance(columns, int):
+            raise TypeError("columns must be an int or None")
+        self.columns: int = columns if columns is not None else embedding_dim
+        if self.columns <= 0:
+            raise ValueError(f'Dimension size must be over 0 {self.columns=}')
+
+        if not isinstance(num_of_heads, int):
+            raise TypeError("num_heads must be an int")
+        if num_of_heads <= 0:
+            raise ValueError("num_heads must be positive")
+        if num_of_heads > self.columns:
+            raise ValueError(f"num_of_heads {num_of_heads} cannot be greater than columns {self.columns}")
+        if self.columns % num_of_heads != 0:
+            raise ValueError(f'Columns {self.columns} is not divisible by {num_of_heads}, the modulo is {self.columns % num_of_heads}')
+
+        self.embedding_dim = embedding_dim
+        self.num_of_heads = num_of_heads
+        self.dimensions_per_head = self.columns // num_of_heads
+        self.final_linear_layer_projection_dimensions = embedding_dim if project_to_embedding_dim else self.columns
+
+        # </editor-fold>
+
+        # Need to have init dim be embedding_dim to @ the input
+        self.create_query = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+        self.create_key = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+        self.create_value = LinearLayer.from_feature_counts(embedding_dim, self.columns, dtype=dtype)
+        # Here the in feature is self.columns
+        self.final_linear_layer = LinearLayer.from_feature_counts(self.columns, self.final_linear_layer_projection_dimensions, dtype=dtype)
+
+    def forward(self, inputs, mask=True):
+        # Assuming that input is (Batch Size, Sequence Length, Embedding Dimensions)
+        if inputs.shape[-1] != self.embedding_dim:
+            raise ValueError(f"Expected input last dim to be init's embedding_dim {self.embedding_dim}, got {inputs.shape[-1]}")
+
+        # Each is now (Batch Size, Sequence Length, Columns)
+        query = self.create_query(inputs)
+        key = self.create_key(inputs)
+        value = self.create_value(inputs)
+
+        # Retrieve other useful info
+        batch_size, sequence_length, columns = query.shape
+
+        # Split the columns into a number of heads
+        # For example if num_of_heads = 4 and columns is 24 (..., 24) -> (..., 4, 6)
+        # Each is now (Batch Size, Sequence Length, Number of Heads, Dimensions Per Head)
+        query = query.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
+        key = key.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
+        value = value.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
+
+        # Since heads are really just a second batch we need to move them back to do the operation on the hidden dimension
+        # aka dimensions_per_head. By doing this we can still get an attention matrix (seq_len, seq_len) just over the
+        # dimensions_per_head of that specific head.
+        #  This is because the @ is batched over batch size and heads to do
+        # (..., seq_len, dimensions_per_head) @ (..., seq_len, dimensions_per_head).T
+
+        # Each is now (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
+        # Now we calculate the attention matrix, because the key tensor and query tensor are double batched (over the batches, num of heads),
+        # every single attention matrix is computed in the line below.
+
+        # We have to transpose key to make the following operation valid:
+        # (..., seq_len, dim_per_head) @ (..., dim_per_head, seq_len) -> (..., seq_len, seq_len)
+
+        # The shape of this is (batch_size, num_of_heads, sequence_length, sequence_length)
+        head_separated_attention_matrix = query @ key.transpose(-2, -1)
+
+        # Normally you'd scale off of columns but because each mini batch (each head) has a hidden space of dimensions_per_head
+        # you scale it off of that.
+        head_separated_attention_matrix = head_separated_attention_matrix / math.sqrt(self.dimensions_per_head)
+
+        # Apply the mask
+        if mask:
+            head_separated_attention_matrix = apply_mask(head_separated_attention_matrix)
+
+        # Softmax the attention matrices
+        head_separated_attention_matrix = autograd_functions.softmax_with_kwarg(head_separated_attention_matrix, dim=-1)
+
+        # Get the results per head
+        # Shape is (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
+        head_separated_results = head_separated_attention_matrix @ value
+
+        # Now we need to recombine the heads to get the full embedding dimension back (basically we separated them earlier,
+        # now we are recombining).
+        # First we need to move num_of_heads to the end right before dimensions_per_head to combine them
+        # Shape is now (batch_size, sequence_length, num_of_heads, dimensions_per_head)
+        head_separated_results = head_separated_results.transpose(1, 2)
+
+        # We then recombine num_of_heads & dimensions_per_head
+        # Shape is (batch_size, sequence_length, columns)
+        combined_results = head_separated_results.reshape(batch_size, sequence_length, columns)
+
+        # Multihead attention usually has a final linear layer to combine the results of all the heads and also to project
+        # the output to an expected output like the embedding_dimension for the residual connections.
+        # (Residual connections just means adding the result of this to the original input, but in order to do that they need to be the same shape).
+        # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
+        # AKA embedding_dim instead of columns if project_to_embedding_dim is True
+        return self.final_linear_layer(combined_results)
 
 
 class GHQCache:
@@ -37,14 +207,24 @@ class GHQCache:
         self.value = value
 
     def increment_key(self, new_key):
+        """
+        Thus since we want to increment the Sequence Length we concatenate on the penultimate dimension `-2`
+        `cache.key = torch.cat([cache.key, new_keys], -2)`
+        :param new_key: (Batch Size, KV Groups, New Words, Dimensions Per Head) Tensor with new word vectors to add to the key's cache
+        :return: (Batch Size, KV Groups, Sequence Length, Dimensions Per Head) The full key cache with the new words appended
+        """
         self.key = torch.cat([self.key, new_key], -2)
+        return self.key
 
     def increment_value(self, new_value):
+        # See above's docstring (just replace key with value)
         self.value = torch.cat([self.value, new_value], -2)
+        return self.value
 
     def current_position(self):
         # Size of dim Sequence Length
         return self.key.shape[-2]
+
 
 class GHQ(torch.nn.Module):
     def __init__(
@@ -58,6 +238,7 @@ class GHQ(torch.nn.Module):
             project_to_embedding_dim: bool = True,
             rope_dimensions: int = None,
             use_qk_norm: bool = True,
+            dtype=None
     ):
         """
         Todo write about GHQ
@@ -144,19 +325,19 @@ class GHQ(torch.nn.Module):
         # </editor-fold>
 
         # <editor-fold desc="Layers">
-        self.query_weights = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.columns, bias=False)
-        self.key_weights = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False)
-        self.value_weights = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False)
+        self.create_query = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.columns, bias=False, dtype=dtype)
+        self.create_key = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False, dtype=dtype)
+        self.create_value = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False, dtype=dtype)
         # Here the in feature is self.columns
-        self.final_linear_weights = nn_modules.LinearLayer.from_feature_counts(self.columns, self.final_linear_layer_projection_dimensions, bias=False)
+        self.final_linear_weights = nn_modules.LinearLayer.from_feature_counts(self.columns, self.final_linear_layer_projection_dimensions, bias=False, dtype=dtype)
 
         if use_qk_norm:
-            self.query_norm = nn_modules.RMSNorm(self.dimensions_per_head)
-            self.key_norm = nn_modules.RMSNorm(self.dimensions_per_head)
+            self.query_norm = nn_modules.RMSNorm(self.dimensions_per_head, dtype=dtype)
+            self.key_norm = nn_modules.RMSNorm(self.dimensions_per_head, dtype=dtype)
         # </editor-fold>
 
     # noinspection DuplicatedCode
-    def forward(self, inputs, cache=None, use_cache=False, mask=True) -> tuple[torch.Tensor, GHQCache]:
+    def forward(self, inputs, cache: GHQCache = None, use_cache=False, mask=True) -> tuple[torch.Tensor, GHQCache]:
         # <editor-fold desc="Create QKV">
         # Now forward is only expecting the newest token(s) in the sequence
         # Assuming that input is (Batch Size, Sequence Length, Embedding Dimensions)
@@ -164,9 +345,9 @@ class GHQ(torch.nn.Module):
             raise ValueError(f"Expected input last dim to be init's embedding_dim {self.embedding_dim}, got {inputs.shape[-1]}")
 
         # Each is now (Batch Size, Newest Tokens, Columns)
-        query = self.query_weights(inputs)
-        new_keys = self.key_weights(inputs)
-        new_values = self.value_weights(inputs)
+        query = self.create_query(inputs)  # Technically also new Query, but since we are not appending it to any cache its name can stay like this
+        new_keys = self.create_key(inputs)
+        new_values = self.create_value(inputs)
         batch_size, newest_tokens, columns = query.shape
         # </editor-fold>
 
@@ -209,15 +390,8 @@ class GHQ(torch.nn.Module):
             key = cache.key
             value = cache.value
         elif use_cache:
-            # (Batch Size, KV Groups, Sequence Length, Dimensions Per Head)
-            # Thus since we want to increment the Sequence Length we concatenate on the penultimate dimension `-2`
-            # cache.key = torch.cat([cache.key, new_keys], -2)
-            # cache.value = torch.cat([cache.value, new_values], -2)
-            cache.increment_key(new_keys)
-            cache.increment_value(new_values)
-
-            key = cache.key
-            value = cache.value
+            key = cache.increment_key(new_keys)
+            value = cache.increment_value(new_values)
         else:
             key = new_keys
             value = new_values

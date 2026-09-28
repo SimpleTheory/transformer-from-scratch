@@ -1,5 +1,7 @@
+import typing
 import torch
 import transformer_from_scratch.base_objects.autograd_functions as autograd_functions
+from transformer_from_scratch.base_objects.utility import create_weights, create_biases
 import math
 
 """
@@ -32,22 +34,30 @@ class LinearLayer(torch.nn.Module):
         self.biases = biases
 
     @classmethod
-    def from_feature_counts(cls, in_features: int, out_features: int, initialization_scaling: float = None, bias: bool = True):
+    def from_feature_counts(
+            cls, in_features: int,
+            out_features: int,
+            activation: str | typing.Callable = None,
+            bias: bool = True,
+            initialization_scaling: float = None,
+            dtype=None,
+            **kwargs,
+    ):
         # Layer initialization defaults to `1/sqrt(in_features)`
         # Layer initialization because randn's std is too big leading to big gradients and inefficient learning
         # Generic layer init is torch.randn(...) / sqrt(in_features)
-        if initialization_scaling is None:
-            initialization_scaling = 1 / math.sqrt(in_features)
+        if initialization_scaling is not None:
+            activation = 'static'
         return cls(
-            weights=torch.nn.Parameter(torch.randn(out_features, in_features) * initialization_scaling),
-            biases=torch.nn.Parameter(torch.zeros(out_features)) if bias else None,
+            weights=create_weights(in_features, out_features, activation, initialization_scaling, dtype, **kwargs),
+            biases=create_biases(out_features, dtype) if bias else None,
         )
 
     def forward(self, inputs: torch.Tensor):
         return autograd_functions.wx_plus_b_with_kwarg(inputs, self.weights, self.biases)
 
     @property
-    def bias(self) -> bool:
+    def has_bias(self) -> bool:
         return self.biases is not None
 
 class DoubleLinearApplied(torch.nn.Module):
@@ -55,9 +65,10 @@ class DoubleLinearApplied(torch.nn.Module):
             self,
             in_columns: int,
             intermediate_columns: int,
-            out_columns: int,
+            out_columns: int = None,
             activation_func: torch.autograd.Function = autograd_functions.gelu,
-            initialization_scaling: float = None
+            initialization_scaling: float = None,
+            dtype=None
     ):
         """
         A macro for a double linear layer with an activation function. The idea is to blow up the hidden space to let the
@@ -66,33 +77,47 @@ class DoubleLinearApplied(torch.nn.Module):
 
         (Batch, Sequence Len, Embedding) -> (Batch, Sequence Len, Embedding * 4) -> (Batch, Sequence Len, Embedding)
         """
-        super().__init__()
 
-        self.activation_func: torch.autograd.Function = activation_func
+        # <editor-fold desc="Attribution">
+        super().__init__()
+        if out_columns is None:
+            out_columns = in_columns
+        self.activation_func: torch.autograd.Function = activation_func.apply \
+            if isinstance(activation_func, torch.autograd.Function) else activation_func
+        self.initialization_scaling = initialization_scaling
+        # </editor-fold>
+
         # Using kaiming-he scaling because activation function will likely be relu or gelu
-        self.initialization_scaling = initialization_scaling if initialization_scaling is not None else (math.sqrt(2/in_columns))
-        self.weights_first = torch.nn.Parameter(torch.randn(intermediate_columns, in_columns) * self.initialization_scaling)
-        self.biases_first = torch.nn.Parameter(torch.zeros(intermediate_columns))
+        self.up = LinearLayer.from_feature_counts(
+            in_columns,
+            intermediate_columns,
+            activation=activation_func,
+            initialization_scaling=initialization_scaling,
+            dtype=dtype
+        )
 
         # Regular init scaling here because no activation function after
-        self.weights_second = torch.nn.Parameter(torch.randn(out_columns, intermediate_columns) / math.sqrt(intermediate_columns))
-        self.biases_second = torch.nn.Parameter(torch.zeros(out_columns))
+        self.down = LinearLayer.from_feature_counts(
+            intermediate_columns,
+            out_columns,
+            dtype=dtype
+        )
 
     def forward(self, inputs: torch.Tensor):
-        # Memory allocation might be inefficient here but this code is better for clarity in the meantime
-        intermediate_space = autograd_functions.wx_plus_b.apply(inputs, self.weights_first, self.biases_first)
-        intermediate_space = self.activation_func.apply(intermediate_space)
-        result = autograd_functions.wx_plus_b.apply(intermediate_space, self.weights_second, self.biases_second)
-        # result = autograd_functions.relu.apply(result)
-        return result
+        """
+        1st: Upcast the inputs
+        2nd: Apply the activation function on the result
+        3rd: Downcast the activated result and return that
+        """
+        return self.down(self.activation_func(self.up(inputs)))
 
 class LayerNorm(torch.nn.Module):
-    def __init__(self, trailing_dim_of_input: int):
+    def __init__(self, trailing_dim_of_input: int, dtype=None):
         super().__init__()
         # At the beginning it should normalize without scaling so setting the weights to one and the biases to 0 will
         # allow it to at first normalize and then learn to reapply the scale
-        self.weights = torch.nn.Parameter(torch.ones(trailing_dim_of_input))
-        self.biases = torch.nn.Parameter(torch.zeros(trailing_dim_of_input))
+        self.weights = torch.nn.Parameter(torch.ones(trailing_dim_of_input, dtype=dtype))
+        self.biases = torch.nn.Parameter(torch.zeros(trailing_dim_of_input, dtype=dtype))
 
     def forward(self, inputs):
         return autograd_functions.layer_normalization.apply(inputs, self.weights, self.biases)
@@ -158,11 +183,11 @@ class InvertedDropout(torch.nn.Module):
         return inputs * mask / (1 - self.probability)
 
 class EmbeddingLayer(torch.nn.Module):
-    def __init__(self, vocab_size: int, embedding_dimensions: int, initializer=.02):
+    def __init__(self, vocab_size: int, embedding_dimensions: int, initializer=.02, dtype=None):
         super().__init__()
         # Scale the matrix by an arbitrary scalar for the randomized weights to be lower for more stable gradients (gpt recommends .02)
         # Maybe parametrize it
-        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions) * initializer)
+        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions) * initializer).to(dtype=dtype)
 
     def forward(self, tokens):
         """
@@ -174,263 +199,6 @@ class EmbeddingLayer(torch.nn.Module):
         :return: (batch_size, sequence_length, embedding_dimensions)
         """
         return autograd_functions.embedding_function.apply(tokens, self.embedding_matrix)
-
-class SingleHeadAttention(torch.nn.Module):
-    def __init__(self, embedding_dim: int, columns: int = None):
-        """
-        Todo write about the concepts behind single head attention
-        :param embedding_dim:
-        :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
-        the embedding_dim value
-        """
-        super().__init__()
-        self.columns: int = columns if columns else embedding_dim
-        if self.columns <= 0:
-            raise ValueError(f'Dimension size must be over 0 {columns=}')
-
-        # Need to have init dim be embedding_dim to @ the input
-        # The randomly initialized weights are scaled for more stable training at the beginning
-        # gpt recommends using the default scale of 1/sqrt(embedding dim aka the in_features)
-            # this is usually the default scale for weights that aren't passed through activation functions later
-        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-
-        self.query_bias = torch.nn.Parameter(torch.zeros(self.columns))
-        self.key_bias = torch.nn.Parameter(torch.zeros(self.columns))
-        self.value_bias = torch.nn.Parameter(torch.zeros(self.columns))
-
-    def forward(self, inputs, mask=True):
-        """
-        :param inputs: (Batch Size, Sequence Length, Embedding Dim)
-        :param mask: Whether or not a mask should be applied to the attention matrix (so that tokens can't see into the future)
-        :return: (Batch Size, Sequence Length, Columns)
-        """
-        # Each is now (Batch Size, Sequence Length, Columns)
-        query = autograd_functions.wx_plus_b_with_kwarg(inputs, self.query_weights, self.query_bias, normal=True)
-        key = autograd_functions.wx_plus_b_with_kwarg(inputs, self.key_weights, self.key_bias, normal=True)
-        value = autograd_functions.wx_plus_b_with_kwarg(inputs, self.value_weights, self.value_bias, normal=True)
-
-        # The final attention matrix should be (Seq Len, Seq Len) (essentially every token by every token)
-        # To get that we need to transpose either the Q or K (by convention the K) to get
-            # (Seq Len, Columns) @ (Columns, Seq Len)
-        # .transpose(-2, -1) transposes the 2nd to last dimension with the last dimension
-            # so (768, 12, 4) -> (768, 4, 12)
-        # (Seq Len, Columns) @ (Columns, Seq Len) -> (Seq, Seq)
-        attention_matrix = query @ key.transpose(-2, -1)
-        # Scaled by the size of the hidden space (for some reason)(, avoided inplace operation for pytorch debugging)
-        attention_matrix = attention_matrix / math.sqrt(self.columns)
-        if mask:
-            attention_matrix = apply_mask(attention_matrix)
-        # Apply softmax to get a score for each (token x token) that the value matrix can use
-        attention_matrix = autograd_functions.softmax_with_kwarg(attention_matrix, dim=-1)
-
-        # Multiply the scores of each token x token to the value matrix
-        # (batch_size, seq_len, seq_len) @ (batch_size, seq_len, columns)
-
-        return attention_matrix @ value  # Return (Batch Size, Sequence Length, Columns)
-
-class MultiHeadAttention(torch.nn.Module):
-    def __init__(self, embedding_dim: int, num_of_heads: int, columns: int = None, project_to_embedding_dim: bool = True):
-        """
-        Todo write about the concepts behind multihead attention
-        :param embedding_dim: The embedding_dim/channels/hidden_space/whatever you want to call it of the input
-        :param num_of_heads: The number of heads to split the columns to. The following must be true (self.columns % num_of_heads == 0)
-        :param columns: Hidden space of Q, K, V. Also the trailing dim of the new output, by default it is the same as
-        the embedding_dim value
-        :param project_to_embedding_dim: If `True` projects the final return of the forward pass to (batch_size, sequence_length, embedding_dim)
-        if `False` the forward pass returns (batch_size, sequence_length, columns)
-        """
-        super().__init__()
-
-        # <editor-fold desc="Input Validation & Attribute Creation">
-        if not isinstance(embedding_dim, int):
-            raise TypeError("embedding_dim must be an int")
-        if embedding_dim <= 0:
-            raise ValueError("embedding_dim must be positive")
-        if columns is not None and not isinstance(columns, int):
-            raise TypeError("columns must be an int or None")
-        self.columns: int = columns if columns is not None else embedding_dim
-        if self.columns <= 0:
-            raise ValueError(f'Dimension size must be over 0 {self.columns=}')
-
-        if not isinstance(num_of_heads, int):
-            raise TypeError("num_heads must be an int")
-        if num_of_heads <= 0:
-            raise ValueError("num_heads must be positive")
-        if num_of_heads > self.columns:
-            raise ValueError(f"num_of_heads {num_of_heads} cannot be greater than columns {self.columns}")
-        if self.columns % num_of_heads != 0:
-            raise ValueError(f'Columns {self.columns} is not divisible by {num_of_heads}, the modulo is {self.columns % num_of_heads}')
-
-        self.embedding_dim = embedding_dim
-        self.num_of_heads = num_of_heads
-        self.dimensions_per_head = self.columns // num_of_heads
-        self.final_linear_layer_projection_dimensions = embedding_dim if project_to_embedding_dim else self.columns
-
-        # </editor-fold>
-
-        # Need to have init dim be embedding_dim to @ the input
-        # Also need to scale the randomly initialized weights for more stable training at the beginning
-        # SCALE (gpt recommends doing same scale as func just do 1/sqrt(embedding dim aka the in_features))
-        self.query_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-        self.key_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-        self.value_weights = torch.nn.Parameter(torch.randn(embedding_dim, self.columns) / math.sqrt(embedding_dim))
-        # Here the in feature is self.columns
-        self.final_linear_weights = torch.nn.Parameter(torch.randn(self.columns, self.final_linear_layer_projection_dimensions) / math.sqrt(self.columns))
-
-        self.query_bias = torch.nn.Parameter(torch.zeros(self.columns))
-        self.key_bias = torch.nn.Parameter(torch.zeros(self.columns))
-        self.value_bias = torch.nn.Parameter(torch.zeros(self.columns))
-        self.final_linear_bias = torch.nn.Parameter(torch.zeros(self.final_linear_layer_projection_dimensions))
-
-    def forward(self, inputs, mask=True):
-        # Assuming that input is (Batch Size, Sequence Length, Embedding Dimensions)
-        if inputs.shape[-1] != self.embedding_dim:
-            raise ValueError(f"Expected input last dim to be init's embedding_dim {self.embedding_dim}, got {inputs.shape[-1]}")
-
-        # Each is now (Batch Size, Sequence Length, Columns)
-        query: torch.Tensor = autograd_functions.wx_plus_b_with_kwarg(inputs, self.query_weights, self.query_bias, normal=True)
-        key = autograd_functions.wx_plus_b_with_kwarg(inputs, self.key_weights, self.key_bias, normal=True)
-        value = autograd_functions.wx_plus_b_with_kwarg(inputs, self.value_weights, self.value_bias, normal=True)
-
-        # Retrieve other useful info
-        batch_size, sequence_length, columns = query.shape
-
-        # Split the columns into a number of heads
-        # For example if num_of_heads = 4 and columns is 24 (..., 24) -> (..., 4, 6)
-        # Each is now (Batch Size, Sequence Length, Number of Heads, Dimensions Per Head)
-        query = query.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
-        key = key.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
-        value = value.view(batch_size, sequence_length, self.num_of_heads, self.dimensions_per_head)
-
-        # Since heads are really just a second batch we need to move them back to do the operation on the hidden dimension
-        # aka dimensions_per_head. By doing this we can still get an attention matrix (seq_len, seq_len) just over the
-        # dimensions_per_head of that specific head.
-        #  This is because the @ is batched over batch size and heads to do
-        # (..., seq_len, dimensions_per_head) @ (..., seq_len, dimensions_per_head).T
-
-        # Each is now (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
-
-        # Now we calculate the attention matrix, because the key tensor and query tensor are double batched (over the batches, num of heads),
-        # every single attention matrix is computed in the line below.
-
-        # We have to transpose key to make the following operation valid:
-        # (..., seq_len, dim_per_head) @ (..., dim_per_head, seq_len) -> (..., seq_len, seq_len)
-
-        # The shape of this is (batch_size, num_of_heads, sequence_length, sequence_length)
-        head_separated_attention_matrix = query @ key.transpose(-2, -1)
-
-        # Normally you'd scale off of columns but because each mini batch (each head) has a hidden space of dimensions_per_head
-        # you scale it off of that.
-        head_separated_attention_matrix = head_separated_attention_matrix / math.sqrt(self.dimensions_per_head)
-
-        # Apply the mask
-        if mask:
-            head_separated_attention_matrix = apply_mask(head_separated_attention_matrix)
-
-        # Softmax the attention matrices
-        head_separated_attention_matrix = autograd_functions.softmax_with_kwarg(head_separated_attention_matrix, dim=-1)
-
-        # Get the results per head
-        # Shape is (Batch Size, Number of Heads, Sequence Length, Dimensions Per Head)
-        head_separated_results = head_separated_attention_matrix @ value
-
-        # Now we need to recombine the heads to get the full embedding dimension back (basically we separated them earlier,
-        # now we are recombining).
-        # First we need to move num_of_heads to the end right before dimensions_per_head to combine them
-        # Shape is now (batch_size, sequence_length, num_of_heads, dimensions_per_head)
-        head_separated_results = head_separated_results.transpose(1, 2)
-
-        # We then recombine num_of_heads & dimensions_per_head
-        # Shape is (batch_size, sequence_length, columns)
-        combined_results = head_separated_results.reshape(batch_size, sequence_length, columns)
-
-        # Multihead attention usually has a final linear layer to combine the results of all the heads and also to project
-        # the output to an expected output like the embedding_dimension for the residual connections.
-        # (Residual connections just means adding the result of this to the original input, but in order to do that they need to be the same shape).
-        # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
-        # AKA embedding_dim instead of columns if project_to_embedding_dim is True
-        return autograd_functions.wx_plus_b_with_kwarg(combined_results, self.final_linear_weights, self.final_linear_bias, normal=True)
-
-class InitWeightScaling:
-    """
-    Weight Initialization Scaling:
-
-        Generic/Unactivated Layer
-            1/sqrt(in_features)
-            • A generic linear layer at init should scaled by the 1/sqrt(in_features),
-             though this could change from the activation function for example:
-        Xavier/Glorot style, often for tanh/sigmoid-ish balanced layers
-            W = torch.randn(in_features, out_features) * math.sqrt(2 / (in_features + out_features))
-        Kaiming/He style, often for ReLU networks
-            W = torch.randn(in_features, out_features) * math.sqrt(2 / in_features)
-        etc...
-
-    The reason you have to do this is that the activation function gates a lot of the output so the initial scale should be different
-
-    Syntax Warning: The initialization must take place within the nn.Parameter(...) otherwise it loses its parameter status!
-    """
-
-    def __init__(self, *, in_features: int, out_features: int, activation: str = 'generic', **kwargs):
-        self.in_features = in_features
-        self.out_features = out_features
-        self.activation = activation.lower().strip()
-        self.kwargs = kwargs
-
-    def generic(self) -> float:
-        # Fan-in
-        return 1/math.sqrt(self.in_features)
-
-    def tanh_style(self) -> float:
-        # Xavier
-        return math.sqrt(2 / (self.in_features + self.out_features))
-
-    def relu_style(self) -> float:
-        # Kaiming-He
-        return math.sqrt(2 / self.in_features)
-
-    def static_style(self) -> float:
-        # Use this key for a static multiplier
-        return self.kwargs['static_multiplier']
-
-    def static_style_on_residuals(self):
-        blocks = self.kwargs['num_transformer_blocks']
-        adds = self.kwargs['residual_additions']  # _per_block
-        return self.kwargs['static_multiplier'] / math.sqrt(blocks * adds)
-
-    def get_init_scaling_const(self) -> float:
-        if self.activation in ('', 'generic', 'default'):
-            return self.generic()
-        elif self.activation.endswith('lu'):
-            return self.relu_style()
-        elif self.activation in ('tanh', 'sigmoid'):
-            return self.tanh_style()
-        elif self.activation == 'static':
-            return self.static_style()
-        elif self.activation == 'static_residual':
-            return self.static_style_on_residuals()
-        else:
-            raise ValueError(f'No init scaling const found for scaling-type {self.activation}')
-
-    @staticmethod
-    def get_const(in_features: int, out_features: int, activation: str = 'generic', **kwargs):
-        cls = InitWeightScaling(in_features=in_features, out_features=out_features, activation=activation, **kwargs)
-        return cls.get_init_scaling_const()
-
-def create_weights(in_features: int, out_features: int, activation: str = 'generic', **kwargs) -> torch.nn.Parameter:
-    # Should be formatted out then in
-    return torch.nn.Parameter(
-        torch.randn(out_features, in_features)
-        *
-        InitWeightScaling.get_const(in_features, out_features, activation, **kwargs)
-    )
-
-def create_biases(out_features):
-    return torch.nn.Parameter(torch.zeros(out_features))
 
 def apply_mask(attention_matrix: torch.Tensor) -> torch.Tensor:
         # Attention matrix is (... , Sequence Length, Sequence Length)

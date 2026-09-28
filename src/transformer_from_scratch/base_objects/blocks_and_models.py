@@ -11,11 +11,9 @@ class TransformerBlock(torch.nn.Module):
             embedding_dimension: int,
             num_of_heads: int,
             columns: int = None,
-            # skip_attention_layer_norm: bool = True,
             ff_intermediate_columns: int = None,
-            ff_total_experts: int = 8,
-            ff_experts_to_accept: int = 2,
-            dropout_probability: float = 0.1
+            dropout_probability: float = 0.1,
+            dtype=None,
     ):
         # TODO init level doc comment explaining the params
         # INCLUDE IN DOC COMMENT Columns % Num of heads must == 0
@@ -29,12 +27,12 @@ class TransformerBlock(torch.nn.Module):
         # </editor-fold>
 
         self.dropout = InvertedDropout(dropout_probability)
-        self.layer_norm_1 = LayerNorm(embedding_dimension)
-        self.attention_block = MultiHeadAttention(embedding_dimension, num_of_heads, columns, True)
-        self.layer_norm_2 = LayerNorm(embedding_dimension)
+        self.layer_norm_1 = LayerNorm(embedding_dimension, dtype=dtype)
+        self.attention_block = MultiHeadAttention(embedding_dimension, num_of_heads, columns, True, dtype=dtype)
+        self.layer_norm_2 = LayerNorm(embedding_dimension, dtype=dtype)
 
         # Decide on which of these to use at first
-        self.feed_forward = DoubleLinearApplied(embedding_dimension, self.ff_intermediate_columns, embedding_dimension)
+        self.feed_forward = DoubleLinearApplied(embedding_dimension, self.ff_intermediate_columns, embedding_dimension, dtype=dtype)
         # self.feed_forward = MoEDoubleLinearApplied(
         #     ff_total_experts,
         #     ff_experts_to_accept,
@@ -83,17 +81,21 @@ class GPTModel(torch.nn.Module):
             num_heads: int,
             ff_intermediate_columns_multiplier: int = 4,
             dropout_probability: float = 0.1,
-            tie_weights: bool = False
+            tie_weights: bool = False,
+            dtype=None
     ):
+        # <editor-fold desc="Attributes">
         super().__init__()
         self.vocab_size = vocab_size
         self.embedding_dimension = embedding_dimension
         self.max_sequence_length = max_sequence_length
         self.total_blocks = total_blocks
         self.ff_intermediate_columns_multiplier = ff_intermediate_columns_multiplier
+        # </editor-fold>
 
-        self.token_embeddings = EmbeddingLayer(vocab_size, embedding_dimension)
-        self.positional_embeddings = EmbeddingLayer(max_sequence_length, embedding_dimension)
+        # <editor-fold desc="Layers">
+        self.token_embeddings = EmbeddingLayer(vocab_size, embedding_dimension, dtype=dtype)
+        self.positional_embeddings = EmbeddingLayer(max_sequence_length, embedding_dimension, dtype=dtype)
         self.dropout = InvertedDropout(dropout_probability)
 
         self.transformer_blocks = torch.nn.ModuleList([
@@ -101,12 +103,15 @@ class GPTModel(torch.nn.Module):
                 embedding_dimension=embedding_dimension,
                 num_of_heads=num_heads,
                 ff_intermediate_columns=embedding_dimension * ff_intermediate_columns_multiplier,
-                dropout_probability=dropout_probability
+                dropout_probability=dropout_probability,
+                dtype=dtype
                 # skip_attention_layer_norm=False,
             )
             for _ in range(total_blocks)
         ])
-        self.final_layer_norm = LayerNorm(embedding_dimension)
+        self.final_layer_norm = LayerNorm(embedding_dimension, dtype=dtype)
+        # </editor-fold>
+
         # Weight tying is using the same table for token embedding and for the linear_to_vocab layer.
         # The idea being that you save a lot of parameters since the (vocab_size, embedding_dim) table is ginormous.
         # It usually performs worse than having an independent specialized table for the task though.
@@ -117,9 +122,9 @@ class GPTModel(torch.nn.Module):
 
             # Creating the layer like this is fine because the embedding matrix is already (vocab_size, embedding_dim)
             # which is already (out_features, in_features).
-            self.linear_to_vocab = LinearLayer(self.token_embeddings.embedding_matrix, torch.nn.Parameter(torch.zeros(vocab_size)))
+            self.linear_to_vocab = LinearLayer(self.token_embeddings.embedding_matrix, torch.nn.Parameter(torch.zeros(vocab_size, dtype=dtype)))
         else:
-            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dimension, vocab_size)
+            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dimension, vocab_size, dtype=dtype)
 
     def forward(self, inputs):
         """
@@ -240,7 +245,8 @@ class SmallQwen3Block(torch.nn.Module):
             project_to_embedding_dim: bool = True,
             rope_dimensions: int | None = None,
             ffn_intermediate_size: int = 3072,
-            ffn_size_as_multiplier: bool = False
+            ffn_size_as_multiplier: bool = False,
+            dtype: torch.dtype = torch.bfloat16
     ):
         super().__init__()
         self.attention = GHQ(
@@ -254,10 +260,17 @@ class SmallQwen3Block(torch.nn.Module):
             columns,
             project_to_embedding_dim,
             rope_dimensions,
+            dtype=dtype
         )
-        self.ffn = GatedFFN(embedding_dim, intermediate_columns=ffn_intermediate_size, intermediate_columns_as_multiplier=ffn_size_as_multiplier, bias=False)
-        self.norm1 = RMSNorm(embedding_dim)
-        self.norm2 = RMSNorm(embedding_dim)
+        self.ffn = GatedFFN(
+            embedding_dim,
+            intermediate_columns=ffn_intermediate_size,
+            intermediate_columns_as_multiplier=ffn_size_as_multiplier,
+            bias=False,
+            dtype=dtype
+        )
+        self.norm1 = RMSNorm(embedding_dim, dtype=dtype)
+        self.norm2 = RMSNorm(embedding_dim, dtype=dtype)
         self.cache: GHQCache | None = None
 
     def reset_cache(self):
@@ -313,7 +326,7 @@ class SmallQwen3Model(torch.nn.Module):
             ff_intermediate_size: int = 3072,
             ffn_size_as_multiplier: bool = False,
             tie_weights: bool = True,
-            dtype: torch.dtype = torch.bfloat16,  # TODO Apply this dtype to all the sub functions via modifying them and their params
+            dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -331,13 +344,13 @@ class SmallQwen3Model(torch.nn.Module):
         # Rope is applied per head not on the total embedding!
         self.rope_params: RopeParameters = compute_basic_rope_params(self.rope_dimensions, max_sequence_length, theta_base=rope_base)
 
-        self.embedding_layer = EmbeddingLayer(vocab_size, embedding_dim)
-        self.final_norm = RMSNorm(embedding_dim)
+        self.embedding_layer = EmbeddingLayer(vocab_size, embedding_dim, dtype=dtype)
+        self.final_norm = RMSNorm(embedding_dim, dtype=dtype)
 
         if tie_weights:
             self.linear_to_vocab = LinearLayer(self.embedding_layer.embedding_matrix, None)
         else:
-            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dim, vocab_size, bias=False)
+            self.linear_to_vocab = LinearLayer.from_feature_counts(embedding_dim, vocab_size, bias=False, dtype=dtype)
 
         self.attention_blocks = torch.nn.ModuleList([SmallQwen3Block(
             embedding_dim=embedding_dim,
@@ -348,7 +361,8 @@ class SmallQwen3Model(torch.nn.Module):
             columns=columns,
             rope_dimensions=rope_dimensions,
             ffn_intermediate_size=ff_intermediate_size,
-            ffn_size_as_multiplier=ffn_size_as_multiplier
+            ffn_size_as_multiplier=ffn_size_as_multiplier,
+            dtype=dtype,
         ) for _ in range(num_of_blocks)])
         
     def forward(self, inputs, reset_cache=False, use_cache=False):

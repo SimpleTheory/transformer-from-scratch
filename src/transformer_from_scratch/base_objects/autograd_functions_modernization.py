@@ -1,8 +1,7 @@
-import torch.nn
-
 from transformer_from_scratch.base_objects.autograd_functions import *
-from typing import NamedTuple
 
+
+@utility.upscale_autograd()
 class rms_norm(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -172,6 +171,11 @@ def compute_basic_rope_params(embedding_dimension: int, context_length: int, the
 
     return RopeParameters(cos, sin)
 
+@utility.upscale(
+    dtype_to_cast=torch.float32,
+    original_dtype_arg_index=0,
+    args_indices_to_upcast=[0],
+)
 def apply_rope(input_tensor, cos, sin, offset=0):
     """
     The useful property of rope is that when the rotated query and key are used in the attention dot product:
@@ -239,6 +243,11 @@ def apply_rope(input_tensor, cos, sin, offset=0):
 
     return result.to(dtype=input_tensor.dtype)
 
+@utility.upscale(
+    dtype_to_cast=torch.float32,
+    original_dtype_arg_index=1,
+    args_indices_to_upcast=[1],
+)
 def apply_partial_rope(rope_dim: int, input_tensor, cos, sin, offset=0, return_separately=False):
     # Split into two tensors divided along the embedding dimension
     # The idea is to apply rope to one but not the other
@@ -255,27 +264,3 @@ def apply_partial_rope(rope_dim: int, input_tensor, cos, sin, offset=0, return_s
         return rope_part, untouched_part
     return torch.cat((rope_part, untouched_part), dim=-1)
 # </editor-fold>
-
-class KVCache:
-    def __init__(self, number_of_layers):
-        self.number_of_layers = number_of_layers
-        self.cache = [None] * number_of_layers
-
-    def get(self, layer_index):
-        return self.cache[layer_index]
-
-    def update(self, layer_index, value):
-        self.cache[layer_index] = value
-
-    def get_all(self):
-        return self.cache
-
-    def reset(self):
-        for layer in range(len(self.cache)):
-            self.cache[layer] = None
-
-    def __getitem__(self, item):
-        return self.get(item)
-
-    def __setitem__(self, key, value):
-        return self.update(key, value)

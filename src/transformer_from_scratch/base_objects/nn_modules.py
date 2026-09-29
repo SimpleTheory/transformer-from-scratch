@@ -187,7 +187,7 @@ class EmbeddingLayer(torch.nn.Module):
         super().__init__()
         # Scale the matrix by an arbitrary scalar for the randomized weights to be lower for more stable gradients (gpt recommends .02)
         # Maybe parametrize it
-        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions) * initializer).to(dtype=dtype)
+        self.embedding_matrix = torch.nn.Parameter(torch.randn(vocab_size, embedding_dimensions, dtype=dtype) * initializer)
 
     def forward(self, tokens):
         """

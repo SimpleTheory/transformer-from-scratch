@@ -125,7 +125,7 @@ def compute_basic_rope_params(embedding_dimension: int, context_length: int, the
     # [10,000**(0/512), 10,000**(2/512), ... ] (embedding_dim/2,)
     inv_freq = 1.0 / (
             theta_base ** (
-            torch.arange(0, embedding_dimension, 2, dtype=dtype).float()  # range(0, embedding_dim, 2)
+            torch.arange(0, embedding_dimension, 2, dtype=dtype)  # range(0, embedding_dim, 2)
             / embedding_dimension)
     )
     positions = torch.arange(context_length, dtype=dtype)  # range(context_length) (context_length,)
@@ -241,7 +241,7 @@ def apply_rope(input_tensor, cos, sin, offset=0):
     # So this is equivalent to the rotation matrix where (a,c) and (b,d) are pairs
     result = (input_tensor * cos) + (rotated * sin)
 
-    return result.to(dtype=input_tensor.dtype)
+    return result
 
 @utility.upscale(
     dtype_to_cast=torch.float32,

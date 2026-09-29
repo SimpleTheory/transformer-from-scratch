@@ -323,7 +323,7 @@ class SmallQwen3Model(torch.nn.Module):
             num_of_blocks: int = 28,
             rope_dimensions: int | None = None,  # If none will default to all of a head's dimensions
             rope_base: int = 1_000_000,  # The base in RoPE's "theta"
-            ff_intermediate_size: int = 3072,
+            ffn_intermediate_size: int = 3072,
             ffn_size_as_multiplier: bool = False,
             tie_weights: bool = True,
             dtype: torch.dtype = torch.bfloat16,
@@ -334,7 +334,7 @@ class SmallQwen3Model(torch.nn.Module):
         self.embedding_dim = embedding_dim
         self.num_of_heads = num_of_heads
         self.num_of_kv_groups = num_of_kv_groups
-        self.ffn_intermediate_size = ff_intermediate_size
+        self.ffn_intermediate_size = ffn_intermediate_size
         self.dimensions_per_head = dimensions_per_head if dimensions_per_head is not None else self.calculate_head_dim()
         self.rope_dimensions = rope_dimensions if rope_dimensions is not None else self.dimensions_per_head
 
@@ -360,7 +360,7 @@ class SmallQwen3Model(torch.nn.Module):
             dimensions_per_head=self.dimensions_per_head,
             columns=columns,
             rope_dimensions=rope_dimensions,
-            ffn_intermediate_size=ff_intermediate_size,
+            ffn_intermediate_size=ffn_intermediate_size,
             ffn_size_as_multiplier=ffn_size_as_multiplier,
             dtype=dtype,
         ) for _ in range(num_of_blocks)])
@@ -368,7 +368,7 @@ class SmallQwen3Model(torch.nn.Module):
     def forward(self, inputs, reset_cache=False, use_cache=False):
         if reset_cache:
             self.reset_cache()
-        self.verify_input(inputs)
+        self.verify_input(inputs, use_cache)
 
         data_to_work_on = self.embedding_layer(inputs)
         for block in self.blocks:

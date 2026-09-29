@@ -133,13 +133,10 @@ def upscale_autograd(
                 for grad in grad_outputs
             )
             gradients = original_backward(ctx, *grad_outputs)
-            if len(gradients) != len(ctx._original_dtypes):
-                raise RuntimeError(
-                    f"Backward returned {len(gradients)} gradients for "
-                    f"{len(ctx._original_dtypes)} forward arguments."
-                )
             if not isinstance(gradients, tuple):
                 gradients = (gradients,)
+            if len(gradients) != len(ctx._original_dtypes):
+                raise RuntimeError(f"Backward returned {len(gradients)} gradients for {len(ctx._original_dtypes)} forward arguments.")
 
             # Each backward output corresponds to its forward input.
             result = tuple(

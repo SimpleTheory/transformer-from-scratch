@@ -1,8 +1,8 @@
 import typing
 import torch
 import transformer_from_scratch.base_objects.autograd_functions as autograd_functions
-from transformer_from_scratch.base_objects.utility import create_weights, create_biases
-import math
+from transformer_from_scratch.base_objects.utility import create_weights, create_biases, is_autograd_function
+
 
 """
 Notes:
@@ -82,8 +82,11 @@ class DoubleLinearApplied(torch.nn.Module):
         super().__init__()
         if out_columns is None:
             out_columns = in_columns
-        self.activation_func: torch.autograd.Function = activation_func.apply \
-            if isinstance(activation_func, torch.autograd.Function) else activation_func
+        self.activation_func = (
+            activation_func.apply
+            if is_autograd_function(activation_func)
+            else activation_func
+        )
         self.initialization_scaling = initialization_scaling
         # </editor-fold>
 

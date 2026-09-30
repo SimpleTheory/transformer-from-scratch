@@ -1,13 +1,17 @@
 from pathlib import Path
 import torch
 from transformer_from_scratch.base_objects.blocks_and_models import GPTModel
-import transformer_from_scratch.trainer as trainer
+import transformer_from_scratch.trainer.model_specific.gpt2_style as trainer
 import tiktoken
 from transformer_from_scratch.trainer.utility import to_device
+import json
+from transformer_from_scratch import project_root
 
 encoder = tiktoken.get_encoding('gpt2')
 n_vocab = encoder.n_vocab
-config = trainer.Config('./whatever', load_path=r'C:\Users\arigf\Downloads\model_result_from_brandon\checkpoint.pt')
+load_path = json.loads(project_root('.config/load_files.json').read_text())['gpt2_style_model']
+# noinspection PyUnresolvedReferences
+config = trainer.Config(save_path='./whatever', load_path=load_path)
 eot_token = '<|endoftext|>'
 
 def isolate_prompted_story(text: str):
@@ -79,10 +83,10 @@ if __name__ == '__main__':
     )
     to_device(model)
 
-    model.load_state_dict(torch.load(config.load_path))
+    model.load_state_dict(torch.load(load_path), strict=True)
     prompt = "and the elf turned into a goblin"
     repeat_times = 5
-    start_with_eot = False
+    start_with_eot = True
     out = convenient_generate(prompt, start_with_eot=start_with_eot)
     # out = convenient_generate('The princess was poisoned by an apple and fell into a deep sleep')
     print(out)

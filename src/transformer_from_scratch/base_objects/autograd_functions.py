@@ -462,7 +462,11 @@ class cross_entropy(torch.autograd.Function):
 def cross_entropy_with_kwarg(probabilities: torch.Tensor, targets: torch.Tensor, reduction: str = "mean"):
     return cross_entropy.apply(probabilities, targets, reduction)
 
-@utility.upscale_autograd()
+@utility.upscale_autograd(
+    compute_dtype=torch.float32,
+    args_to_upcast=(0,),      # logits
+    outputs_to_downcast=(),   # keep loss in FP32
+)
 class softmaxed_cross_entropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, results_of_model_tensor, targets):

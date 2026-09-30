@@ -341,9 +341,9 @@ class derived:
     def __repr__(self) -> str:
         return '<derived>'
 
-def project_root() -> Path:
-    current_file_path = Path(__file__).resolve()
-    return current_file_path.parent.parent.parent.parent
+# def project_root() -> Path:
+#     current_file_path = Path(__file__).resolve()
+#     return current_file_path.parent.parent.parent.parent
 
 def optional_environment_path(name: str, default=None) -> Path | None:
     value = os.getenv(name, default=default)

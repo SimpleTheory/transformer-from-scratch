@@ -12,13 +12,12 @@ def upscale(
         result_indices_to_downcast: list[int] | None = None,
 ):
     """
-     TODO WRITE THIS DOC COMMENT
-    :param dtype_to_cast:
-    :param original_dtype_arg_index:
-    :param args_indices_to_upcast:
-    :param kwarg_keys_to_upcast:
-    :param result_indices_to_downcast:
-    :return:
+    :param dtype_to_cast: What dtype should be upscaled
+    :param original_dtype_arg_index: index of argument to use as a basis for the original dtype (default 0)
+    :param args_indices_to_upcast: iterable of indices to upcast (default is all float type tensors)
+    :param kwarg_keys_to_upcast: iterable of keys to upcast their corresponding values (default is all float type tensors in kwargs)
+    :param result_indices_to_downcast: index of results to downcast back to the original dtype
+    leave a blank iterable (like tuple()) in order to return everything as upcasted.
     """
     def outer_wrapper(func):
         @functools.wraps(func)
@@ -158,13 +157,19 @@ def upscale_autograd(
         return cls
     return decorator
 
+def is_autograd_function(obj) -> bool:
+    return isinstance(obj, type) and issubclass(obj, torch.autograd.Function)
+
+
 def callable_name(obj) -> str:
+    if obj is None:
+        return ''
     if isinstance(obj, str):
         return obj.lower().strip()
 
     # Handles SomeAutogradFunction.apply
     owner = getattr(obj, '__self__', None)
-    if isinstance(owner, type) and issubclass(owner, torch.autograd.Function):
+    if is_autograd_function(owner):
         return owner.__name__.lower()
 
     # Normal functions / callable methods

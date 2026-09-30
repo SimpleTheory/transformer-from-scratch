@@ -378,8 +378,51 @@ class SmallQwen3Model(torch.nn.Module):
         return logits
 
     @torch.no_grad()
-    def generate(self, token_ids: torch.Tensor, max_new_tokens: int):
-        raise NotImplementedError()  # TODO
+    def generate(
+            self,
+            token_ids: torch.Tensor,
+            max_new_tokens: int = None,
+            use_cache: bool = True,
+            eos_token_id: int | None = None,
+    ):
+        if max_new_tokens is None:
+            max_new_tokens = self.max_sequence_length - token_ids.shape[-1]
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be >= 0")
+        if max_new_tokens == 0:
+            return token_ids
+
+        # A generation call should always start with a fresh cache.
+        self.reset_cache()
+        finished = torch.zeros(token_ids.shape[0], dtype=torch.bool, device=token_ids.device,)
+
+        if use_cache:
+            # First call manually: process the entire prompt once and populate every block's KV cache.
+            logits = self(token_ids, use_cache=True,)
+            # Over the max possible sequence length
+            for token_index in range(max_new_tokens):
+                next_token, token_ids, stop = filter_and_sample_for_next_token(
+                    logits, token_ids, finished, token_index, max_new_tokens, eos_token_id
+                )
+                if stop:
+                    break
+                # Decode: the previous prompt is already represented by the KV cache,
+                # so only process the newly generated token.
+                logits = self(next_token, use_cache=True,)
+
+        else:
+            # Without a cache we must recompute the context every generation step.
+            for token_index in range(max_new_tokens):
+                # Over all the batches crop the sequence (starting from the last token going backwards) to the size of the
+                # max sequence length
+                context = token_ids[:, -self.max_sequence_length:]
+                logits = self(context, use_cache=False)
+                next_token, token_ids, stop = filter_and_sample_for_next_token(
+                    logits, token_ids, finished, token_index, max_new_tokens, eos_token_id
+                )
+                if stop:
+                    break
+        return token_ids
 
     @property
     def blocks(self):
@@ -436,4 +479,38 @@ class SmallQwen3Model(torch.nn.Module):
         if return_instance:
             return Config()
         return Config
+
+# <editor-fold desc="Generation Utility">
+def filter_and_sample_for_next_token(logits, token_ids, finished_mask, token_index, max_new_tokens, eos_token_id=None):
+    # The last position predicts the next token.
+    # Get next token because the scores are (batch size, sequence length, vocab size)
+    # So this indexes (over all batches, the last word, all the vocab columns)
+    next_token_scores = logits[:, -1, :]
+    # Softmax each row (across the columns -1) to turn the scores into probabilities
+    next_token_probabilities = autograd_functions.softmax_with_kwarg(next_token_scores, dim=-1)
+    # (batch_size, 1) Sample it (there is only one row (per batch), and you get one of the column's value as a sample)
+    next_token = torch.multinomial(next_token_probabilities, num_samples=1)
+    # Check if this was the final token, if one batch already ended replace its token with just EOT.
+    next_token, finished, all_finished = handle_eos(next_token, finished_mask, eos_token_id)
+    # Append the next token to the overall sequence
+    token_ids = torch.cat([token_ids, next_token], dim=1)
+    return next_token, token_ids, should_stop_generating(token_index, max_new_tokens, all_finished)
+
+def handle_eos(next_token: torch.Tensor, finished: torch.Tensor, eos_token_id: int | None,)\
+        -> tuple[torch.Tensor, torch.Tensor, bool]:
+    if eos_token_id is None:
+        return next_token, finished, False
+    # Keep already-finished rows pinned to EOS.
+    next_token = torch.where(
+        finished.unsqueeze(-1),
+        torch.full_like(next_token, eos_token_id),
+        next_token,
+    )
+    # Mark rows that just produced EOS.
+    finished |= next_token.squeeze(-1).eq(eos_token_id)
+    return next_token, finished, bool(finished.all())
+
+def should_stop_generating(token_index, max_new_tokens, all_finished):
+    return token_index == max_new_tokens - 1 or all_finished
+# </editor-fold>
 

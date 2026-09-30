@@ -1,6 +1,7 @@
 # Project Ignores
 data/
 .idea/
+.config/
 
 # Default Python Ignores
 

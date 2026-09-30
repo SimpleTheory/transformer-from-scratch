@@ -9,12 +9,13 @@ import transformer_from_scratch.trainer.training_framework as training_framework
 # import optimizer
 import torch
 import transformer_from_scratch.trainer.utility as utility
+from transformer_from_scratch import project_root
 
 
 # # The loss is a scalar averaged over each token and over all the batches
 # loss = autograd_functions.softmaxed_cross_entropy.apply(final_logits, expected_outputs)
 # return final_logits, loss
-data_dir = utility.project_root() / 'data'
+data_dir = project_root() / 'data'
 # selection_seed: int = 42
 
 class Config(utility.CommandLineArguments):

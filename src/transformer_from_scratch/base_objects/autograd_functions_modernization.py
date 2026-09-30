@@ -43,7 +43,6 @@ class rms_norm(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_gradients):
         input_over_mean_sqrt, mean_square_sqrt_over_1, weights = ctx.saved_tensors
-        # TODO: Calculate gradient of each parameter and return in order above!
         # In trying to get the gradient over the mean we kinda have to work backwards to get the gradient of each intermediary
         # step which would entail:
             # gradient of input_over_mean_sqrt,

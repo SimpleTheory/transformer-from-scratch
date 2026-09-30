@@ -54,9 +54,12 @@ def upscale(
                     return element.to(original_dtype)
                 return element
 
+            if outputs_to_downcast is not None and len(outputs_to_downcast) == 0:
+                return result
             if isinstance(result, tuple):
                 return tuple(downcast(element, index) for index, element in enumerate(result))
             return downcast(result)
+
         return inner_wrapper
     return outer_wrapper
 
@@ -115,6 +118,9 @@ def upscale_autograd(
                 ):
                     return value.to(original_output_dtype)
                 return value
+
+            if outputs_to_downcast is not None and len(outputs_to_downcast) == 0:
+                return result
 
             if isinstance(result, tuple):
                 return tuple(downcast(value, idx) for idx, value in enumerate(result))

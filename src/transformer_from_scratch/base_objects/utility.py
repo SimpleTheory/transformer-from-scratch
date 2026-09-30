@@ -54,7 +54,7 @@ def upscale(
                     return element.to(original_dtype)
                 return element
 
-            if outputs_to_downcast is not None and len(outputs_to_downcast) == 0:
+            if result_indices_to_downcast is not None and len(result_indices_to_downcast) == 0:
                 return result
             if isinstance(result, tuple):
                 return tuple(downcast(element, index) for index, element in enumerate(result))

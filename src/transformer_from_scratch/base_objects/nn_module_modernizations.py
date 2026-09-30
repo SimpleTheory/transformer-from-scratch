@@ -100,6 +100,7 @@ class GatedFFN(torch.nn.Module):
         # </editor-fold>
 
         self.up = LinearLayer.from_feature_counts(in_columns, intermediate_columns, bias=bias, dtype=dtype)
+
         # Init scaling here because of activation function, though this can be changed by the parameters
         self.gate = LinearLayer.from_feature_counts(
             in_columns,
@@ -109,6 +110,7 @@ class GatedFFN(torch.nn.Module):
             initialization_scaling=gate_initialization_scaling,
             dtype=dtype
         )
+
         self.down = LinearLayer.from_feature_counts(intermediate_columns, out_columns, bias=bias, dtype=dtype)
 
     def forward(self, input_tensor):

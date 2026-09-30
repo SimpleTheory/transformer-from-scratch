@@ -15,7 +15,6 @@ try:
 except ImportError:
     annotationlib = None
 
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def no_grad(func):
@@ -314,6 +313,15 @@ class CommandLineArguments(abc.ABC, metaclass=OnlyKwargsAndDataclass):
         mapping = parse_config_file(config_file)
         return cls.from_mapping(mapping, *args, **kwargs)
 
+    def keys(self):
+        return tuple(field.name for field in fields(self))
+
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
+
 class derived:
     __is_derived_field__ = True
 
@@ -340,10 +348,6 @@ class derived:
 
     def __repr__(self) -> str:
         return '<derived>'
-
-# def project_root() -> Path:
-#     current_file_path = Path(__file__).resolve()
-#     return current_file_path.parent.parent.parent.parent
 
 def optional_environment_path(name: str, default=None) -> Path | None:
     value = os.getenv(name, default=default)

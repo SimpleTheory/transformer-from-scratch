@@ -329,7 +329,7 @@ class GHQ(torch.nn.Module):
         self.create_key = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False, dtype=dtype)
         self.create_value = nn_modules.LinearLayer.from_feature_counts(embedding_dim, self.num_kv_groups * self.dimensions_per_head, bias=False, dtype=dtype)
         # Here the in feature is self.columns
-        self.final_linear_weights = nn_modules.LinearLayer.from_feature_counts(self.columns, self.final_linear_layer_projection_dimensions, bias=False, dtype=dtype)
+        self.final_linear_layer = nn_modules.LinearLayer.from_feature_counts(self.columns, self.final_linear_layer_projection_dimensions, bias=False, dtype=dtype)
 
         if use_qk_norm:
             self.query_norm = nn_modules.RMSNorm(self.dimensions_per_head, dtype=dtype)
@@ -449,4 +449,4 @@ class GHQ(torch.nn.Module):
         # (Residual connections just means adding the result of this to the original input, but in order to do that they need to be the same shape).
         # Final shape (batch_size, sequence_length, columns) or (..., embedding_dim) depending on this param in the init `project_to_embedding_dim`
         # AKA embedding_dim instead of columns if project_to_embedding_dim is True
-        return self.final_linear_weights(combined_results), cache
+        return self.final_linear_layer(combined_results), cache
